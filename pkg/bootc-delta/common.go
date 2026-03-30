@@ -11,8 +11,6 @@ import (
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
-const maxBlobSizeToReadInMemory = 1024 * 1024 // 1 MB
-
 type TarIndex struct {
 	file    *os.File
 	entries map[string]*TarEntry
