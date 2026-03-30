@@ -51,6 +51,7 @@ func createCommand(args []string) error {
 	verbose := fs.Bool("verbose", false, "show statistics after creation")
 	fs.BoolVar(verbose, "v", false, "show statistics after creation (shorthand)")
 	debug := fs.Bool("debug", false, "show detailed progress information")
+	parallelism := fs.Int("j", 0, "max parallel tar-diff workers (default: number of CPUs)")
 
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "Usage: bootc-delta create [OPTIONS] <old-image> <new-image> <output>")
@@ -82,11 +83,12 @@ func createCommand(args []string) error {
 	defer os.RemoveAll(tmpDir)
 
 	opts := bootcdelta.CreateOptions{
-		OldImage:   fs.Arg(0),
-		NewImage:   fs.Arg(1),
-		OutputPath: fs.Arg(2),
-		TmpDir:     tmpDir,
-		Verbose:    *verbose,
+		OldImage:    fs.Arg(0),
+		NewImage:    fs.Arg(1),
+		OutputPath:  fs.Arg(2),
+		TmpDir:      tmpDir,
+		Verbose:     *verbose,
+		Parallelism: *parallelism,
 		Debug: func(format string, args ...interface{}) {
 			if *debug {
 				fmt.Printf(format+"\n", args...)
