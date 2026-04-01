@@ -2,6 +2,7 @@ package bootcdelta
 
 import (
 	"archive/tar"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,19 @@ import (
 	digest "github.com/opencontainers/go-digest"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
+
+const (
+	mediaTypeDeltaConfig        = "application/vnd.redhat.bootc-delta.config.v1+json"
+	mediaTypeTarDiff            = "application/vnd.tar-diff"
+	annotationDeltaTarget       = "io.github.containers.delta.target"
+	annotationDeltaSource       = "io.github.containers.delta.source"
+	annotationDeltaSourceConfig = "io.github.containers.delta.source-config"
+	annotationDeltaTo           = "io.github.containers.delta.to"
+	annotationDeltaReused       = "io.github.containers.delta.reused"
+	annotationDeltaReusedDiffID = "io.github.containers.delta.reused-diff-id"
+)
+
+var ociLayoutFileData = []byte(`{"imageLayoutVersion":"1.0.0"}`)
 
 type TarIndex struct {
 	file    *os.File
@@ -21,10 +35,19 @@ type TarEntry struct {
 	size   int64
 }
 
+type OCILayer struct {
+	Digest digest.Digest
+	DiffID digest.Digest
+}
+
 type OCIImage struct {
 	index          *v1.Index
-	layers         map[digest.Digest]bool
-	diffIDToDigest map[digest.Digest]digest.Digest
+	manifest       *v1.Manifest
+	manifestDigest digest.Digest
+	configDigest   digest.Digest
+	layers         []OCILayer
+	layerByDigest  map[digest.Digest]*OCILayer
+	layerByDiffID  map[digest.Digest]*OCILayer
 	tarIndex       *TarIndex
 }
 
@@ -151,13 +174,7 @@ func parseOCIImage(tarIndex *TarIndex) (*OCIImage, error) {
 		return nil, fmt.Errorf("failed to parse manifest: %w", err)
 	}
 
-	// Build layers map
-	layers := make(map[digest.Digest]bool)
-	for _, layer := range manifest.Layers {
-		layers[layer.Digest] = true
-	}
-
-	// Read config and build diffIDToDigest map
+	// Read config to get diff_ids.
 	if manifest.Config.Digest == "" {
 		return nil, fmt.Errorf("manifest has no config digest")
 	}
@@ -172,17 +189,28 @@ func parseOCIImage(tarIndex *TarIndex) (*OCIImage, error) {
 		return nil, fmt.Errorf("failed to parse config: %w", err)
 	}
 
-	diffIDToDigest := make(map[digest.Digest]digest.Digest)
-	for i, layer := range manifest.Layers {
+	layers := make([]OCILayer, len(manifest.Layers))
+	layerByDigest := make(map[digest.Digest]*OCILayer, len(manifest.Layers))
+	layerByDiffID := make(map[digest.Digest]*OCILayer, len(manifest.Layers))
+	for i, l := range manifest.Layers {
+		layers[i].Digest = l.Digest
 		if i < len(config.RootFS.DiffIDs) {
-			diffIDToDigest[config.RootFS.DiffIDs[i]] = layer.Digest
+			layers[i].DiffID = config.RootFS.DiffIDs[i]
+		}
+		layerByDigest[layers[i].Digest] = &layers[i]
+		if layers[i].DiffID != "" {
+			layerByDiffID[layers[i].DiffID] = &layers[i]
 		}
 	}
 
 	return &OCIImage{
 		index:          &index,
+		manifest:       &manifest,
+		manifestDigest: manifestDesc.Digest,
+		configDigest:   manifest.Config.Digest,
 		layers:         layers,
-		diffIDToDigest: diffIDToDigest,
+		layerByDigest:  layerByDigest,
+		layerByDiffID:  layerByDiffID,
 		tarIndex:       tarIndex,
 	}, nil
 }
@@ -279,4 +307,21 @@ func writeBlobTarFile(w *tar.Writer, tarIndex *TarIndex, d digest.Digest) error 
 
 func blobTarName(d digest.Digest) string {
 	return "blobs/sha256/" + d.Encoded()
+}
+
+func computeDigest(data []byte) digest.Digest {
+	return digest.FromBytes(data)
+}
+
+func computeFileDigest(path string) (digest.Digest, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return digest.NewDigestFromBytes(digest.SHA256, h.Sum(nil)), nil
 }

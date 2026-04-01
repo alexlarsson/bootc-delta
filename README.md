@@ -115,3 +115,87 @@ diff_ids](https://github.com/bootc-dev/bootc/pull/2081).
 
 The required support in tar-diff has been merged in [PR #66](https://github.com/containers/tar-diff/pull/66) and is
 available in the current main branch. This is not yet in a release, but will be in the release after 0.3.1.
+
+## Delta file format
+
+A delta file is an uncompressed tar archive containing an [OCI image
+layout](https://github.com/opencontainers/image-spec/blob/main/image-layout.md), where the single manifest describes a
+delta artifact rather than a runnable image. This is an oci-archive form that matches what would normally be used
+for OCI artifacts, and the delta could indeed be stored in a registy as an oci artifact.
+
+This format is very similar to the one described in https://github.com/flatpak/flatpak-oci-specs, but with these
+changes:
+
+ * The config delta manifest mimetype was changed.
+ * We store the original manifests as layers (to make the delta applicable stand-alone).
+ * Delta layer order doesn't exactly match the original "new" image, and all layers need not be available.
+ * Layers that are used as-is from the original "old" image are recorded in a new `delta.reused` annotation..
+ * We allow layers to be stored as the original tar.gz (if delta was not helpful for that layer).
+ * The `delta.from` layer annotation is no longer used, as we diff against all layers in source image.
+
+### Outer structure
+
+```
+oci-layout
+index.json                          - points to the delta manifest
+blobs/sha256/<delta-manifest-hash>  - the delta manifest
+blobs/sha256/<delta-config-hash>    - empty config object "{}"
+blobs/sha256/<image-manifest-hash>  - the target image manifest (embedded)
+blobs/sha256/<image-config-hash>    - the target image config (embedded)
+blobs/sha256/<layer-data-hash>      - one blob per changed layer (tar-diff or original gzip)
+```
+
+### Delta manifest
+
+The delta manifest is a standard OCI image manifest with config media type
+`application/vnd.redhat.bootc-delta.config.v1+json` and the following top-level annotations:
+
+| Annotation | Description |
+|---|---|
+| `io.github.containers.delta.target` | Digest of the target image manifest |
+| `io.github.containers.delta.source` | Digest of the old image manifest |
+| `io.github.containers.delta.source-config` | Digest of the old image config |
+| `io.github.containers.delta.reused` | JSON array of layer digests that are expected to already be present on the target system |
+| `io.github.containers.delta.reused-diff-id` | JSON array of diff_ids (uncompressed sha256) for the reused layers, parallel to `delta.reused` |
+
+### Delta manifest layers
+
+The manifest layers contain the embedded image metadata followed by one entry per changed layer. Layers are identified
+by media type — parsers must look up layers by type and ignore unknown types for forward compatibility.
+
+**Embedded image manifest** (`application/vnd.oci.image.manifest.v1+json`): the complete manifest of the target image,
+needed during apply to know the full layer list and reconstruct the output OCI archive.
+
+**Embedded image config** (`application/vnd.oci.image.config.v1+json`): the complete config of the target image, needed
+to obtain the diff_ids for validating reconstructed layers.
+
+**Delta layers** — one per changed layer, with these annotations:
+
+| Annotation | Description |
+|---|---|
+| `io.github.containers.delta.to` | Digest of the target layer this blob reconstructs |
+
+A delta layer has one of two media types:
+
+- `application/vnd.tar-diff`: a [tar-diff](https://github.com/containers/tar-diff) binary delta. Applying it against the
+  source files (ostree objects on the local system) produces the uncompressed target layer tar. The result must be
+  gzip-compressed and its diff_id validated before use.
+- `application/vnd.oci.image.layer.v1.tar+gzip`: the original layer, stored verbatim when the tar-diff would have been
+  larger.
+
+Layers whose diff_id matches one already installed on the system (listed in `delta.reused-diff-id`) are absent from the
+delta entirely. The apply tool omits them from the reconstructed archive and relies on bootc's diff_id-based
+deduplication to find them locally.
+
+### Applying a delta
+
+To reconstruct a usable OCI archive from a delta:
+
+1. Parse the delta manifest and locate the embedded image manifest and config by media type.
+2. For each layer in the image manifest, find the matching delta layer by `delta.to` annotation.
+   - If found as a tar-diff: apply against local ostree objects under `/sysroot/ostree/repo/objects/`, gzip-compress the
+     result, and verify the diff_id matches the config.
+   - If found as original gzip: copy the blob directly.
+   - If not found: the layer is reused - omit the blob from the output (bootc will locate it by diff_id).
+3. Write a new OCI archive with the image config, the reconstructed layer blobs, and a rewritten image manifest
+   reflecting the new digests of any recompressed layers.

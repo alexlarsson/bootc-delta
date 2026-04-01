@@ -12,6 +12,7 @@ import (
 
 	tarpatch "github.com/containers/tar-diff/pkg/tar-patch"
 	digest "github.com/opencontainers/go-digest"
+	specs "github.com/opencontainers/image-spec/specs-go"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -24,76 +25,100 @@ type ApplyOptions struct {
 	Warning     func(format string, args ...interface{})
 }
 
-type deltaMetadata struct {
-	index          v1.Index
-	manifestDigest digest.Digest
-	manifest       v1.Manifest
-	layerDigests   map[digest.Digest]bool
-	layerToDiffID  map[digest.Digest]digest.Digest
+// deltaArtifact holds the parsed contents of a delta OCI artifact.
+type deltaArtifact struct {
+	imageManifest       v1.Manifest
+	imageConfig         v1.Image
+	imageManifestDigest digest.Digest
+	imageConfigDigest   digest.Digest
+	// deltaLayerByTo maps delta.to digest → delta manifest layer descriptor
+	deltaLayerByTo map[digest.Digest]v1.Descriptor
 }
 
-func parseDeltaMetadata(opts *ApplyOptions, tarIndex *TarIndex) (*deltaMetadata, error) {
+func parseDeltaArtifact(opts *ApplyOptions, tarIndex *TarIndex) (*deltaArtifact, error) {
 	indexData, err := tarIndex.ReadFile("index.json")
 	if err != nil {
 		return nil, fmt.Errorf("delta archive does not contain index.json")
 	}
-
-	var index v1.Index
-	if err := json.Unmarshal(indexData, &index); err != nil {
+	var ociIndex v1.Index
+	if err := json.Unmarshal(indexData, &ociIndex); err != nil {
 		return nil, fmt.Errorf("failed to parse index.json: %w", err)
 	}
-	if len(index.Manifests) == 0 {
+	if len(ociIndex.Manifests) == 0 {
 		return nil, fmt.Errorf("delta archive contains no manifests")
 	}
-	if len(index.Manifests) > 1 {
-		return nil, fmt.Errorf("delta archive contains multiple manifests (%d), only single-image archives are supported", len(index.Manifests))
-	}
 
-	manifestDigest := index.Manifests[0].Digest
-	opts.Debug("  Index points to manifest: %s", manifestDigest.Encoded()[:16])
+	deltaManifestDigest := ociIndex.Manifests[0].Digest
+	opts.Debug("  Delta manifest: %s", deltaManifestDigest.Encoded()[:16])
 
-	manifestData, err := tarIndex.ReadFile(blobTarName(manifestDigest))
+	deltaManifestData, err := tarIndex.ReadFile(blobTarName(deltaManifestDigest))
 	if err != nil {
-		return nil, fmt.Errorf("manifest %s referenced by index not found in delta", manifestDigest.Encoded()[:16])
+		return nil, fmt.Errorf("failed to read delta manifest: %w", err)
 	}
-
-	var manifest v1.Manifest
-	if err := json.Unmarshal(manifestData, &manifest); err != nil {
-		return nil, fmt.Errorf("failed to parse manifest: %w", err)
+	var deltaManifest v1.Manifest
+	if err := json.Unmarshal(deltaManifestData, &deltaManifest); err != nil {
+		return nil, fmt.Errorf("failed to parse delta manifest: %w", err)
 	}
-	opts.Debug("  Found manifest: %s with %d layers", manifestDigest.Encoded()[:16], len(manifest.Layers))
-
-	if manifest.Config.Digest == "" {
-		return nil, fmt.Errorf("manifest has no config digest")
+	if deltaManifest.Config.MediaType != mediaTypeDeltaConfig {
+		return nil, fmt.Errorf("not a delta artifact (config mediaType: %s)", deltaManifest.Config.MediaType)
 	}
-
-	configData, err := tarIndex.ReadFile(blobTarName(manifest.Config.Digest))
-	if err != nil {
-		return nil, fmt.Errorf("config %s referenced by manifest not found in delta", manifest.Config.Digest.Encoded()[:16])
-	}
-
-	var config v1.Image
-	if err := json.Unmarshal(configData, &config); err != nil {
-		return nil, fmt.Errorf("failed to parse config: %w", err)
-	}
-	opts.Debug("  Found config: %s with %d diff_ids", manifest.Config.Digest.Encoded()[:16], len(config.RootFS.DiffIDs))
-
-	layerDigests := make(map[digest.Digest]bool)
-	layerToDiffID := make(map[digest.Digest]digest.Digest)
-	for i, layer := range manifest.Layers {
-		layerDigests[layer.Digest] = true
-		if i < len(config.RootFS.DiffIDs) {
-			layerToDiffID[layer.Digest] = config.RootFS.DiffIDs[i]
+	// Find embedded image manifest and config by media type, and collect
+	// delta layer descriptors (keyed by delta.to) from the remaining layers.
+	var imageManifestDesc, imageConfigDesc *v1.Descriptor
+	deltaLayerByTo := make(map[digest.Digest]v1.Descriptor)
+	for i := range deltaManifest.Layers {
+		layer := &deltaManifest.Layers[i]
+		switch layer.MediaType {
+		case v1.MediaTypeImageManifest:
+			imageManifestDesc = layer
+		case v1.MediaTypeImageConfig:
+			imageConfigDesc = layer
+		case mediaTypeTarDiff, v1.MediaTypeImageLayerGzip:
+			toStr := layer.Annotations[annotationDeltaTo]
+			if toStr == "" {
+				continue
+			}
+			toDigest, err := digest.Parse(toStr)
+			if err != nil {
+				opts.Warning("invalid delta.to annotation %q: %v", toStr, err)
+				continue
+			}
+			deltaLayerByTo[toDigest] = *layer
 		}
 	}
-	opts.Debug("Found %d layer digests", len(layerDigests))
+	if imageManifestDesc == nil {
+		return nil, fmt.Errorf("delta manifest contains no embedded image manifest layer")
+	}
+	if imageConfigDesc == nil {
+		return nil, fmt.Errorf("delta manifest contains no embedded image config layer")
+	}
 
-	return &deltaMetadata{
-		index:          index,
-		manifestDigest: manifestDigest,
-		manifest:       manifest,
-		layerDigests:   layerDigests,
-		layerToDiffID:  layerToDiffID,
+	imageManifestData, err := tarIndex.ReadFile(blobTarName(imageManifestDesc.Digest))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read embedded image manifest: %w", err)
+	}
+	var imageManifest v1.Manifest
+	if err := json.Unmarshal(imageManifestData, &imageManifest); err != nil {
+		return nil, fmt.Errorf("failed to parse embedded image manifest: %w", err)
+	}
+	opts.Debug("  Image manifest: %s (%d layers)", imageManifestDesc.Digest.Encoded()[:16], len(imageManifest.Layers))
+
+	imageConfigData, err := tarIndex.ReadFile(blobTarName(imageConfigDesc.Digest))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read embedded image config: %w", err)
+	}
+	var imageConfig v1.Image
+	if err := json.Unmarshal(imageConfigData, &imageConfig); err != nil {
+		return nil, fmt.Errorf("failed to parse embedded image config: %w", err)
+	}
+	opts.Debug("  Image config: %s (%d diff_ids)", imageConfigDesc.Digest.Encoded()[:16], len(imageConfig.RootFS.DiffIDs))
+
+	return &deltaArtifact{
+		imageManifest:       imageManifest,
+		imageConfig:         imageConfig,
+		imageManifestDigest: imageManifestDesc.Digest,
+		imageConfigDigest:   imageConfigDesc.Digest,
+		deltaLayerByTo:      deltaLayerByTo,
 	}, nil
 }
 
@@ -109,15 +134,14 @@ func ApplyDelta(opts ApplyOptions) error {
 	}
 	defer deltaTarIndex.Close()
 
-	opts.Debug("\nAnalyzing delta file...")
-	metadata, err := parseDeltaMetadata(&opts, deltaTarIndex)
+	opts.Debug("\nParsing delta artifact...")
+	artifact, err := parseDeltaArtifact(&opts, deltaTarIndex)
 	if err != nil {
 		return err
 	}
 
-	opts.Debug("\nProcessing delta file...")
-	digestMapping := make(map[digest.Digest]digest.Digest)
-	blobSizes := make(map[digest.Digest]int64)
+	// Reconstruct diff_id lookup from image config.
+	layerDiffIDs := artifact.imageConfig.RootFS.DiffIDs
 
 	outFile, err := os.Create(opts.OutputPath)
 	if err != nil {
@@ -128,95 +152,84 @@ func ApplyDelta(opts ApplyOptions) error {
 	tarWriter := tar.NewWriter(outFile)
 	defer tarWriter.Close()
 
-	// Write oci-layout
 	opts.Debug("\nWriting oci-layout")
-	ociLayoutData, err := deltaTarIndex.ReadFile("oci-layout")
-	if err != nil {
-		return fmt.Errorf("failed to read oci-layout: %w", err)
-	}
-	if err := writeTarFile(tarWriter, "oci-layout", ociLayoutData); err != nil {
+	if err := writeTarFile(tarWriter, "oci-layout", ociLayoutFileData); err != nil {
 		return err
 	}
 
-	// Process all blobs from the delta
-	for name := range deltaTarIndex.entries {
-		if !isBlobPath(name) {
+	// Write image config blob (unchanged).
+	if err := writeBlobTarFile(tarWriter, deltaTarIndex, artifact.imageConfigDigest); err != nil {
+		return fmt.Errorf("failed to write image config: %w", err)
+	}
+
+	// Process each layer in the image manifest.
+	// For reconstructed layers we need to remap the digest.
+	outputLayers := make([]v1.Descriptor, len(artifact.imageManifest.Layers))
+	copy(outputLayers, artifact.imageManifest.Layers)
+
+	opts.Debug("\nProcessing layers...")
+	for i, layer := range artifact.imageManifest.Layers {
+		deltaLayer, inDelta := artifact.deltaLayerByTo[layer.Digest]
+		if !inDelta {
+			// Reused layer: keep original descriptor, no blob written.
+			opts.Debug("  Layer %s: skipped (not in delta)", layer.Digest.Encoded()[:16])
 			continue
 		}
-		d := digestFromBlobPath(name)
 
-		// Skip manifest (will be rewritten)
-		if d == metadata.manifestDigest {
-			continue
+		var expectedDiffID digest.Digest
+		if i < len(layerDiffIDs) {
+			expectedDiffID = layerDiffIDs[i]
 		}
 
-		// Handle layers
-		if metadata.layerDigests[d] {
-			r, _ := deltaTarIndex.GetReader(name)
-
-			// Peek to check if tar-diff
-			peek := make([]byte, 8)
-			n, _ := r.Read(peek)
-			r.Seek(0, 0)
-
-			if n >= 8 && isTarDiff(peek) {
-				if err := processLayerDiff(&opts, tarWriter, d, r, metadata.layerToDiffID, &digestMapping, &blobSizes); err != nil {
-					return err
-				}
-			} else {
-				size, _ := deltaTarIndex.GetSize(name)
-				opts.Debug("  Copying non-delta layer %s (%d bytes)", d.Encoded()[:16], size)
-				if err := writeTarFileFromReader(tarWriter, name, size, r); err != nil {
-					return err
-				}
+		if deltaLayer.MediaType == mediaTypeTarDiff {
+			opts.Debug("  Layer %s: reconstructing from tar-diff", layer.Digest.Encoded()[:16])
+			r, err := deltaTarIndex.GetReader(blobTarName(deltaLayer.Digest))
+			if err != nil {
+				return fmt.Errorf("failed to read tar-diff for layer %s: %w", layer.Digest.Encoded()[:16], err)
 			}
-			continue
-		}
-
-		// Copy non-layer, non-manifest blobs (e.g. config)
-		if err := writeBlobTarFile(tarWriter, deltaTarIndex, d); err != nil {
-			return err
-		}
-	}
-
-	opts.Debug("\nWriting updated manifest...")
-
-	// Update layer digests in the manifest for reconstructed layers
-	for i := range metadata.manifest.Layers {
-		if newDigest, ok := digestMapping[metadata.manifest.Layers[i].Digest]; ok {
-			if metadata.manifest.Layers[i].Annotations == nil {
-				metadata.manifest.Layers[i].Annotations = make(map[string]string)
+			newDigest, newSize, err := processLayerDiff(&opts, tarWriter, r, expectedDiffID)
+			if err != nil {
+				return err
 			}
-			metadata.manifest.Layers[i].Annotations["org.containers.bootc.delta.original-digest"] = metadata.manifest.Layers[i].Digest.String()
-			metadata.manifest.Layers[i].Digest = newDigest
-			metadata.manifest.Layers[i].Size = blobSizes[newDigest]
+			outputLayers[i].Digest = newDigest
+			outputLayers[i].Size = newSize
+		} else {
+			opts.Debug("  Layer %s: copying original (%d bytes)", layer.Digest.Encoded()[:16], deltaLayer.Size)
+			if err := writeBlobTarFile(tarWriter, deltaTarIndex, layer.Digest); err != nil {
+				return fmt.Errorf("failed to copy layer %s: %w", layer.Digest.Encoded()[:16], err)
+			}
 		}
 	}
 
-	manifestJSON, err := json.Marshal(metadata.manifest)
+	// Build and write the output image manifest.
+	opts.Debug("\nWriting output image manifest...")
+	outputManifest := artifact.imageManifest
+	outputManifest.Layers = outputLayers
+	outputManifestData, err := json.Marshal(outputManifest)
 	if err != nil {
+		return fmt.Errorf("failed to marshal output manifest: %w", err)
+	}
+	outputManifestDigest := computeDigest(outputManifestData)
+	if err := writeTarFile(tarWriter, blobTarName(outputManifestDigest), outputManifestData); err != nil {
 		return err
 	}
 
-	hManifest := sha256.New()
-	hManifest.Write(manifestJSON)
-	newManifestDigest := digest.NewDigestFromBytes(digest.SHA256, hManifest.Sum(nil))
-
-	if err := writeTarFile(tarWriter, blobTarName(newManifestDigest), manifestJSON); err != nil {
-		return err
+	// Build and write index.json.
+	outputIndex := v1.Index{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: v1.MediaTypeImageIndex,
+		Manifests: []v1.Descriptor{{
+			MediaType: v1.MediaTypeImageManifest,
+			Digest:    outputManifestDigest,
+			Size:      int64(len(outputManifestData)),
+		}},
 	}
-
-	// Update index to point to new manifest
-	metadata.index.Manifests[0].Digest = newManifestDigest
-	metadata.index.Manifests[0].Size = int64(len(manifestJSON))
-
-	indexJSON, err := json.Marshal(metadata.index)
+	indexData, err := json.Marshal(outputIndex)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to marshal index: %w", err)
 	}
-
 	opts.Debug("\nWriting index.json")
-	if err := writeTarFile(tarWriter, "index.json", indexJSON); err != nil {
+	if err := writeTarFile(tarWriter, "index.json", indexData); err != nil {
 		return err
 	}
 
@@ -224,26 +237,22 @@ func ApplyDelta(opts ApplyOptions) error {
 	return nil
 }
 
-func processLayerDiff(opts *ApplyOptions, tarWriter *tar.Writer, layerDigest digest.Digest, tarDiffReader io.Reader, layerToDiffID map[digest.Digest]digest.Digest, digestMapping *map[digest.Digest]digest.Digest, blobSizes *map[digest.Digest]int64) error {
-	opts.Debug("  Reconstructing tar-diff layer %s", layerDigest.Encoded()[:16])
-
-	// Create temporary file for compressed data
+func processLayerDiff(opts *ApplyOptions, tarWriter *tar.Writer, tarDiffReader io.Reader, expectedDiffID digest.Digest) (newDigest digest.Digest, newSize int64, err error) {
 	tmpFile, err := os.CreateTemp(opts.TmpDir, "bootc-delta-layer-*.gz")
 	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
+		return "", 0, fmt.Errorf("failed to create temp file: %w", err)
 	}
 	defer os.Remove(tmpFile.Name())
 	defer tmpFile.Close()
 
-	// Create hash writers
-	diffIDHash := sha256.New()     // Hash of uncompressed data
-	compressedHash := sha256.New() // Hash of compressed data
+	diffIDHash := sha256.New()
+	compressedHash := sha256.New()
 
 	// Create gzip writer that writes to both compressedHash and tmpFile
 	compressedMulti := io.MultiWriter(compressedHash, tmpFile)
 	gzWriter, err := gzip.NewWriterLevel(compressedMulti, gzip.DefaultCompression)
 	if err != nil {
-		return err
+		return "", 0, err
 	}
 	gzWriter.Name = ""
 	gzWriter.ModTime = time.Unix(0, 0)
@@ -254,48 +263,41 @@ func processLayerDiff(opts *ApplyOptions, tarWriter *tar.Writer, layerDigest dig
 	dataSource := tarpatch.NewFilesystemDataSource(opts.DeltaSource)
 	if err := tarpatch.Apply(tarDiffReader, dataSource, uncompressedMulti); err != nil {
 		gzWriter.Close()
-		return fmt.Errorf("tar-patch failed: %w", err)
+		return "", 0, fmt.Errorf("tar-patch failed: %w", err)
 	}
-
 	if err := gzWriter.Close(); err != nil {
-		return fmt.Errorf("failed to close gzip writer: %w", err)
+		return "", 0, fmt.Errorf("failed to close gzip writer: %w", err)
 	}
 
 	// Get the diff_id from the uncompressed hash
 	actualDiffID := digest.NewDigestFromBytes(digest.SHA256, diffIDHash.Sum(nil))
 	opts.Debug("    Computed diff_id: %s", actualDiffID.Encoded()[:16])
 
-	if expectedDiffID, ok := layerToDiffID[layerDigest]; ok {
+	if expectedDiffID != "" {
 		opts.Debug("    Expected diff_id: %s", expectedDiffID.Encoded()[:16])
 		if actualDiffID != expectedDiffID {
-			return fmt.Errorf("diff_id mismatch for layer %s: expected %s, got %s",
-				layerDigest.Encoded()[:16], expectedDiffID.Encoded()[:16], actualDiffID.Encoded()[:16])
+			return "", 0, fmt.Errorf("diff_id mismatch: expected %s, got %s",
+				expectedDiffID.Encoded()[:16], actualDiffID.Encoded()[:16])
 		}
 		opts.Debug("    Validated diff_id: %s", actualDiffID.Encoded()[:16])
 	}
 
 	// Get the compressed digest and size
-	newDigest := digest.NewDigestFromBytes(digest.SHA256, compressedHash.Sum(nil))
-	compressedInfo, err := tmpFile.Stat()
+	newDigest = digest.NewDigestFromBytes(digest.SHA256, compressedHash.Sum(nil))
+	info, err := tmpFile.Stat()
 	if err != nil {
-		return err
+		return "", 0, err
 	}
-	compressedSize := compressedInfo.Size()
-
-	(*digestMapping)[layerDigest] = newDigest
-	(*blobSizes)[newDigest] = compressedSize
-
-	opts.Debug("    Compressed to %d bytes, new digest: %s", compressedSize, newDigest.Encoded()[:16])
+	newSize = info.Size()
+	opts.Debug("    Compressed to %d bytes, new digest: %s", newSize, newDigest.Encoded()[:16])
 
 	// Stream the compressed file into the tar archive
 	if _, err := tmpFile.Seek(0, 0); err != nil {
-		return err
+		return "", 0, err
 	}
-	tarName := blobTarName(newDigest)
-	opts.Debug("    Writing tar header for: %s", tarName)
-	if err := writeTarFileFromReader(tarWriter, tarName, compressedSize, tmpFile); err != nil {
-		return fmt.Errorf("failed to write tar header for %s: %w", tarName, err)
+	if err := writeTarFileFromReader(tarWriter, blobTarName(newDigest), newSize, tmpFile); err != nil {
+		return "", 0, fmt.Errorf("failed to write reconstructed layer: %w", err)
 	}
 
-	return nil
+	return newDigest, newSize, nil
 }

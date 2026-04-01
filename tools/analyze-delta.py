@@ -68,18 +68,56 @@ class TarIndex:
             return f.read(size)
 
 
+MEDIA_DELTA_CONFIG   = "application/vnd.redhat.bootc-delta.config.v1+json"
+MEDIA_TAR_DIFF       = "application/vnd.tar-diff"
+MEDIA_IMAGE_MANIFEST = "application/vnd.oci.image.manifest.v1+json"
+MEDIA_IMAGE_CONFIG   = "application/vnd.oci.image.config.v1+json"
+MEDIA_LAYER_GZIP     = "application/vnd.oci.image.layer.v1.tar+gzip"
+
+ANNOTATION_DELTA_TO           = "io.github.containers.delta.to"
+ANNOTATION_DELTA_FROM         = "io.github.containers.delta.from"
+ANNOTATION_DELTA_FROM_DIFF_ID = "io.github.containers.delta.from-diff-id"
+ANNOTATION_DELTA_REUSED       = "io.github.containers.delta.reused"
+ANNOTATION_DELTA_REUSED_DIFF_ID = "io.github.containers.delta.reused-diff-id"
+
+
 def blob_path(digest):
     return 'blobs/sha256/' + digest.split(':')[1]
 
 
 def open_delta(path):
     idx = TarIndex(path)
-    index = json.loads(idx.read('index.json'))
-    mhash = index['manifests'][0]['digest'].split(':')[1]
-    manifest = json.loads(idx.read(f'blobs/sha256/{mhash}'))
-    chash = manifest['config']['digest'].split(':')[1]
-    config = json.loads(idx.read(f'blobs/sha256/{chash}'))
-    return idx, manifest, config
+    oci_index = json.loads(idx.read('index.json'))
+    delta_manifest_digest = oci_index['manifests'][0]['digest']
+    delta_manifest = json.loads(idx.read(blob_path(delta_manifest_digest)))
+
+    if delta_manifest.get('config', {}).get('mediaType') != MEDIA_DELTA_CONFIG:
+        sys.exit("error: not a bootc-delta file (unexpected config mediaType)")
+
+    image_manifest_desc = None
+    image_config_desc = None
+    delta_layer_by_to = {}  # digest string -> layer descriptor dict
+
+    for layer in delta_manifest.get('layers', []):
+        mt = layer.get('mediaType', '')
+        if mt == MEDIA_IMAGE_MANIFEST:
+            image_manifest_desc = layer
+        elif mt == MEDIA_IMAGE_CONFIG:
+            image_config_desc = layer
+        elif mt in (MEDIA_TAR_DIFF, MEDIA_LAYER_GZIP):
+            to_digest = (layer.get('annotations') or {}).get(ANNOTATION_DELTA_TO)
+            if to_digest:
+                delta_layer_by_to[to_digest] = layer
+
+    if image_manifest_desc is None:
+        sys.exit("error: delta file has no embedded image manifest layer")
+    if image_config_desc is None:
+        sys.exit("error: delta file has no embedded image config layer")
+
+    image_manifest = json.loads(idx.read(blob_path(image_manifest_desc['digest'])))
+    image_config = json.loads(idx.read(blob_path(image_config_desc['digest'])))
+
+    return idx, image_manifest, image_config, delta_manifest, delta_layer_by_to
 
 
 # ── tar-diff op stream ────────────────────────────────────────────────────────
@@ -346,17 +384,22 @@ def analyze_layer(blob):
 # ── reporting ─────────────────────────────────────────────────────────────────
 
 def report(delta_path, verbose):
-    idx, manifest, config = open_delta(delta_path)
-    diff_ids = config['rootfs']['diff_ids']
-    layers = manifest['layers']
+    idx, image_manifest, image_config, delta_manifest, delta_layer_by_to = open_delta(delta_path)
+    diff_ids = image_config['rootfs']['diff_ids']
+    layers = image_manifest['layers']
     total_size = os.path.getsize(delta_path)
+    delta_annotations = delta_manifest.get('annotations') or {}
+
+    reused_digests = json.loads(delta_annotations.get(ANNOTATION_DELTA_REUSED, '[]'))
+    reused_diff_ids = json.loads(delta_annotations.get(ANNOTATION_DELTA_REUSED_DIFF_ID, '[]'))
 
     # Build per-layer created_by from history, skipping empty_layer entries
-    history = config.get('history', [])
+    history = image_config.get('history', [])
     layer_created_by = [h.get('created_by', '') for h in history if not h.get('empty_layer')]
 
     print(f"Delta: {delta_path}  ({fmt_size(total_size)})")
-    print(f"Layers: {len(layers)} total")
+    print(f"Layers: {len(layers)} total"
+          f"  (reused: {len(reused_digests)}, changed: {len(delta_layer_by_to)})")
     print()
 
     total_orig = 0
@@ -366,36 +409,47 @@ def report(delta_path, verbose):
         digest = layer['digest']
         diff_id = diff_ids[i] if i < len(diff_ids) else '?'
         created_by = layer_created_by[i] if i < len(layer_created_by) else None
-        bpath = blob_path(digest)
-        present = idx.has(bpath)
         orig_size = layer.get('size', 0)
+        delta_layer = delta_layer_by_to.get(digest)
 
         print(f"Layer {i + 1}/{len(layers)}")
         if created_by:
             print(f"  Created by: {created_by}")
 
-        if not present:
+        if delta_layer is None:
             print(f"  Status:  skipped (reused from parent)")
             print(f"  Digest:  {digest}")
             print(f"  diff_id: {diff_id}")
         else:
-            blob = idx.read(bpath)
-            actual_size = len(blob)
-            is_delta = blob[:8] == MAGIC
+            delta_blob_digest = delta_layer['digest']
+            delta_blob_size = delta_layer.get('size', 0)
+            is_tar_diff = delta_layer.get('mediaType') == MEDIA_TAR_DIFF
 
-            if not is_delta:
+            annotations = delta_layer.get('annotations') or {}
+            from_digests = json.loads(annotations.get(ANNOTATION_DELTA_FROM, '[]'))
+            if isinstance(from_digests, str):
+                from_digests = [from_digests]
+
+            if not is_tar_diff:
                 print(f"  Status:  original (tar-diff not smaller)")
-                print(f"  Size:    {fmt_size(actual_size)}")
+                print(f"  Size:    {fmt_size(delta_blob_size)}")
+                print(f"  Digest:  {digest}")
+                print(f"  diff_id: {diff_id}")
                 total_orig += orig_size
-                total_blob += actual_size
+                total_blob += delta_blob_size
             else:
-                saved = orig_size - actual_size
+                saved = orig_size - delta_blob_size
                 print(f"  Status:  delta")
-                print(f"  Blob size:     {fmt_size(actual_size)}"
+                print(f"  Blob size:     {fmt_size(delta_blob_size)}"
                       f"  (original: {fmt_size(orig_size)}, saved: {fmt_size(saved)} / {pct(saved, orig_size)})")
+                print(f"  Digest:  {digest}")
+                print(f"  diff_id: {diff_id}")
+                if from_digests:
+                    print(f"  Sources: {', '.join(d[:19] for d in from_digests)}")
                 total_orig += orig_size
-                total_blob += actual_size
+                total_blob += delta_blob_size
 
+                blob = idx.read(blob_path(delta_blob_digest))
                 files, hardlinks = analyze_layer(blob)
 
                 cctx = zstd.ZstdCompressor(level=3)

@@ -11,6 +11,8 @@ import (
 
 	tardiff "github.com/containers/tar-diff/pkg/tar-diff"
 	digest "github.com/opencontainers/go-digest"
+	specs "github.com/opencontainers/image-spec/specs-go"
+	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 type CreateOptions struct {
@@ -69,10 +71,13 @@ func CreateDelta(opts CreateOptions) (*CreateStats, error) {
 
 	// Find layers with new content (diff_id not in old image)
 	newOnlyLayers := make(map[digest.Digest]bool)
-	for diffID, newLayerDigest := range new.diffIDToDigest {
-		if _, exists := old.diffIDToDigest[diffID]; !exists {
-			newOnlyLayers[newLayerDigest] = true
-			opts.Debug("  New layer: %s (diff_id: %s)", newLayerDigest.Encoded()[:16], diffID.Encoded()[:16])
+	oldReusedLayers := make(map[digest.Digest]bool)
+	for _, newLayer := range new.layers {
+		if oldLayer, exists := old.layerByDiffID[newLayer.DiffID]; exists {
+			oldReusedLayers[oldLayer.Digest] = true
+		} else {
+			newOnlyLayers[newLayer.Digest] = true
+			opts.Debug("  New layer: %s (diff_id: %s)", newLayer.Digest.Encoded()[:16], newLayer.DiffID.Encoded()[:16])
 		}
 	}
 	stats.ProcessedLayers = len(newOnlyLayers)
@@ -80,6 +85,133 @@ func CreateDelta(opts CreateOptions) (*CreateStats, error) {
 	opts.Debug("Layers with new content (will process): %d", stats.ProcessedLayers)
 	opts.Debug("Layers with existing content (will skip): %d", stats.SkippedLayers)
 
+	opts.Debug("\nProcessing layers...")
+	for _, l := range new.layers {
+		if !newOnlyLayers[l.Digest] {
+			opts.Debug("  Skipping layer with existing content %s", l.Digest.Encoded()[:16])
+		}
+	}
+	layerResults, err := computeLayerDiffsParallel(&opts, old, new, newOnlyLayers, opts.TmpDir)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range layerResults {
+		defer os.Remove(r.diffPath)
+	}
+
+	// Build a map from new layer digest to result for ordered iteration.
+	layerResultByDigest := make(map[digest.Digest]layerDiffResult)
+	for _, r := range layerResults {
+		layerResultByDigest[r.digest] = r
+	}
+
+	// Read embedded image manifest and config data.
+	imageManifestDesc := new.index.Manifests[0]
+	imageManifestData, err := new.tarIndex.ReadFile(blobTarName(imageManifestDesc.Digest))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read new image manifest: %w", err)
+	}
+	imageConfigData, err := new.tarIndex.ReadFile(blobTarName(new.manifest.Config.Digest))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read new image config: %w", err)
+	}
+
+	// Build delta manifest layers (image manifest + config first, then layer blobs).
+	var deltaLayers []v1.Descriptor
+	deltaLayers = append(deltaLayers, v1.Descriptor{
+		MediaType: v1.MediaTypeImageManifest,
+		Digest:    imageManifestDesc.Digest,
+		Size:      int64(len(imageManifestData)),
+	})
+	deltaLayers = append(deltaLayers, v1.Descriptor{
+		MediaType: v1.MediaTypeImageConfig,
+		Digest:    new.manifest.Config.Digest,
+		Size:      int64(len(imageConfigData)),
+	})
+
+	var reusedDigests, reusedDiffIDs []string
+	for _, l := range new.layers {
+		if !newOnlyLayers[l.Digest] {
+			// Collect old reused non-delta layers
+			reusedDigests = append(reusedDigests, l.Digest.String())
+			reusedDiffIDs = append(reusedDiffIDs, l.DiffID.String())
+			continue
+		}
+		r := layerResultByDigest[l.Digest]
+		stats.ProcessedLayerBytes += r.originalSize
+
+		annotations := map[string]string{
+			annotationDeltaTo: l.Digest.String(),
+		}
+		var desc v1.Descriptor
+		if r.diffPath != "" {
+			opts.Debug("  Layer %s: using tar-diff (%d bytes, saved %d)", r.digest.Encoded()[:16], r.diffSize, r.originalSize-r.diffSize)
+			desc = v1.Descriptor{
+				MediaType:   mediaTypeTarDiff,
+				Digest:      r.diffDigest,
+				Size:        r.diffSize,
+				Annotations: annotations,
+			}
+			stats.TarDiffLayerBytes += r.diffSize
+		} else {
+			opts.Debug("  Layer %s: using original (%d bytes)", r.digest.Encoded()[:16], r.originalSize)
+			desc = v1.Descriptor{
+				MediaType:   v1.MediaTypeImageLayerGzip,
+				Digest:      r.digest,
+				Size:        r.originalSize,
+				Annotations: annotations,
+			}
+			stats.OriginalLayerBytes += r.originalSize
+		}
+		deltaLayers = append(deltaLayers, desc)
+	}
+
+	// Build delta manifest.
+	deltaConfigData := []byte("{}")
+	deltaConfigDigest := computeDigest(deltaConfigData)
+	deltaAnnotations := map[string]string{
+		annotationDeltaTarget:       imageManifestDesc.Digest.String(),
+		annotationDeltaSource:       old.manifestDigest.String(),
+		annotationDeltaSourceConfig: old.configDigest.String(),
+	}
+	if len(reusedDigests) > 0 {
+		reusedJSON, _ := json.Marshal(reusedDigests)
+		deltaAnnotations[annotationDeltaReused] = string(reusedJSON)
+		reusedDiffIDJSON, _ := json.Marshal(reusedDiffIDs)
+		deltaAnnotations[annotationDeltaReusedDiffID] = string(reusedDiffIDJSON)
+	}
+	deltaManifest := v1.Manifest{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		Config: v1.Descriptor{
+			MediaType: mediaTypeDeltaConfig,
+			Digest:    deltaConfigDigest,
+			Size:      int64(len(deltaConfigData)),
+		},
+		Annotations: deltaAnnotations,
+		Layers:      deltaLayers,
+	}
+	deltaManifestData, err := json.Marshal(deltaManifest)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal delta manifest: %w", err)
+	}
+	deltaManifestDigest := computeDigest(deltaManifestData)
+
+	// Build OCI index pointing to the delta manifest.
+	ociIndex := v1.Index{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: v1.MediaTypeImageIndex,
+		Manifests: []v1.Descriptor{{
+			MediaType: v1.MediaTypeImageManifest,
+			Digest:    deltaManifestDigest,
+			Size:      int64(len(deltaManifestData)),
+		}},
+	}
+	indexData, err := json.Marshal(ociIndex)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal index: %w", err)
+	}
+
+	// Write output archive.
 	outFile, err := os.Create(opts.OutputPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create output file: %w", err)
@@ -90,63 +222,44 @@ func CreateDelta(opts CreateOptions) (*CreateStats, error) {
 	defer tarWriter.Close()
 
 	opts.Debug("\nWriting oci-layout")
-	ociLayoutData, err := new.tarIndex.ReadFile("oci-layout")
-	if err != nil {
-		return nil, fmt.Errorf("failed to read oci-layout: %w", err)
-	}
-	if err := writeTarFile(tarWriter, "oci-layout", ociLayoutData); err != nil {
+	if err := writeTarFile(tarWriter, "oci-layout", ociLayoutFileData); err != nil {
 		return nil, err
 	}
 
-	opts.Debug("\nWriting index.json")
-	indexData, err := json.Marshal(new.index)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal index: %w", err)
+	opts.Debug("Writing image manifest and config blobs")
+	if err := writeTarFile(tarWriter, blobTarName(imageManifestDesc.Digest), imageManifestData); err != nil {
+		return nil, err
 	}
-	if err := writeTarFile(tarWriter, "index.json", indexData); err != nil {
+	if err := writeTarFile(tarWriter, blobTarName(new.manifest.Config.Digest), imageConfigData); err != nil {
 		return nil, err
 	}
 
-	opts.Debug("\nProcessing layers...")
-	for layerDigest := range new.layers {
-		if !newOnlyLayers[layerDigest] {
-			opts.Debug("  Skipping layer with existing content %s", layerDigest.Encoded()[:16])
+	opts.Debug("Writing layer blobs")
+	for _, l := range new.layers {
+		if !newOnlyLayers[l.Digest] {
+			continue
 		}
-	}
-	layerResults, err := computeLayerDiffsParallel(&opts, old, new, newOnlyLayers, opts.TmpDir)
-	if err != nil {
-		return nil, err
-	}
-	for _, r := range layerResults {
-		defer os.Remove(r.diffPath)
-		stats.ProcessedLayerBytes += r.originalSize
+		r := layerResultByDigest[l.Digest]
 		if r.diffPath != "" {
-			opts.Debug("  Layer %s: using tar-diff (%d bytes, saved %d)", r.digest.Encoded()[:16], r.diffSize, r.originalSize-r.diffSize)
-			if err := writeTarFileFromFile(tarWriter, blobTarName(r.digest), r.diffPath); err != nil {
+			if err := writeTarFileFromFile(tarWriter, blobTarName(r.diffDigest), r.diffPath); err != nil {
 				return nil, err
 			}
-			stats.TarDiffLayerBytes += r.diffSize
 		} else {
-			opts.Debug("  Layer %s: using original (%d bytes)", r.digest.Encoded()[:16], r.originalSize)
-			stats.OriginalLayerBytes += r.originalSize
 			if err := writeBlobTarFile(tarWriter, new.tarIndex, r.digest); err != nil {
 				return nil, err
 			}
 		}
 	}
 
-	// We need to also copy the remaining blobs, like the manifest and the config json
-	opts.Debug("\nWriting non-layer blobs...")
-	for name := range new.tarIndex.entries {
-		if !isBlobPath(name) {
-			continue
-		}
-		d := digestFromBlobPath(name)
-		if d != "" && !new.layers[d] {
-			if err := writeBlobTarFile(tarWriter, new.tarIndex, d); err != nil {
-				return nil, err
-			}
-		}
+	opts.Debug("Writing delta manifest and index.json")
+	if err := writeTarFile(tarWriter, blobTarName(deltaConfigDigest), deltaConfigData); err != nil {
+		return nil, err
+	}
+	if err := writeTarFile(tarWriter, blobTarName(deltaManifestDigest), deltaManifestData); err != nil {
+		return nil, err
+	}
+	if err := writeTarFile(tarWriter, "index.json", indexData); err != nil {
+		return nil, err
 	}
 
 	return stats, nil
@@ -157,6 +270,7 @@ type layerDiffResult struct {
 	originalSize int64
 	diffPath     string // temp file path; empty means use original layer
 	diffSize     int64
+	diffDigest   digest.Digest // sha256 of the diff file blob
 }
 
 func computeLayerDiffsParallel(opts *CreateOptions, old *OCIImage, new *OCIImage, newOnlyLayers map[digest.Digest]bool, tmpDir string) ([]layerDiffResult, error) {
@@ -230,15 +344,21 @@ func computeLayerDiff(opts *CreateOptions, old *OCIImage, new *OCIImage, blobDig
 		return layerDiffResult{digest: blobDigest, originalSize: originalSize}, nil
 	}
 
-	return layerDiffResult{digest: blobDigest, originalSize: originalSize, diffPath: diffPath, diffSize: info.Size()}, nil
+	diffDigest, err := computeFileDigest(diffPath)
+	if err != nil {
+		os.Remove(diffPath)
+		return layerDiffResult{}, fmt.Errorf("failed to compute diff digest: %w", err)
+	}
+
+	return layerDiffResult{digest: blobDigest, originalSize: originalSize, diffPath: diffPath, diffSize: info.Size(), diffDigest: diffDigest}, nil
 }
 
 func runTarDiff(old *OCIImage, new *OCIImage, newLayerDigest digest.Digest, output string) error {
 	var oldFiles []io.ReadSeeker
 
 	// Get readers for all old image layers
-	for layerDigest := range old.layers {
-		r, err := old.tarIndex.GetReader(blobTarName(layerDigest))
+	for _, layer := range old.layers {
+		r, err := old.tarIndex.GetReader(blobTarName(layer.Digest))
 		if err != nil {
 			return err
 		}
