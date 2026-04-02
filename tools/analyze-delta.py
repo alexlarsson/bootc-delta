@@ -321,8 +321,6 @@ def analyze_layer(blob):
                 if current_file is not None:
                     current_file.data_bytes += take
                     current_file.payload_data.extend(data[i:i + take])
-                    if current_src and (not current_file.sources or current_file.sources[-1] != current_src):
-                        current_file.sources.append(current_src)
                 i += take
                 data_rem -= take
                 if data_rem == 0:
@@ -492,10 +490,20 @@ def report(delta_path, verbose):
                     def is_ostree_meta(f):
                         return os.path.splitext(f.name)[1] in OSTREE_META_EXTS
 
+                    def source_display(sources):
+                        if not sources:
+                            return ''
+                        # Try to resolve the first source to a user-visible name via hardlinks
+                        name = display_name(sources[0]) if sources[0] in hardlinks else sources[0]
+                        if len(sources) > 1:
+                            name += f' (+{len(sources) - 1})'
+                        return name
+
                     print()
-                    w = 60
-                    print(f"  {'File':<{w}} {'Size':>9}  {'Compressed':>10}  Type")
-                    print(f"  {'-'*w} {'-'*9}  {'-'*10}  {'-'*8}")
+                    w = 52
+                    sw = 40
+                    print(f"  {'File':<{w}} {'Size':>9}  {'Compressed':>10}  {'Type':<8}  Source")
+                    print(f"  {'-'*w} {'-'*9}  {'-'*10}  {'-'*8}  {'-'*sw}")
 
                     meta = [f for f in files if f.is_regular and is_ostree_meta(f)]
                     for f in files:
@@ -505,7 +513,10 @@ def report(delta_path, verbose):
                         name = display_name(f.name) or f.name
                         if len(name) > w:
                             name = '…' + name[-(w - 1):]
-                        print(f"  {name:<{w}} {fmt_size(f.size):>9}  {fmt_size(f.compressed_payload):>10}  {rt}")
+                        src = source_display(f.sources)
+                        if len(src) > sw:
+                            src = '…' + src[-(sw - 1):]
+                        print(f"  {name:<{w}} {fmt_size(f.size):>9}  {fmt_size(f.compressed_payload):>10}  {rt:<8}  {src}")
 
                     if meta:
                         ma = sum(f.adddata_bytes for f in meta)
@@ -515,7 +526,17 @@ def report(delta_path, verbose):
                         mrt = 'reused' if not ma and not md else \
                               'new' if not ma else 'delta'
                         label = f"[metadata] ({len(meta)} objects)"
-                        print(f"  {label:<{w}} {fmt_size(ms):>9}  {fmt_size(mcp):>10}  {mrt}")
+                        meta_sources = []
+                        seen_ms = set()
+                        for mf in meta:
+                            for s in mf.sources:
+                                if s not in seen_ms:
+                                    meta_sources.append(s)
+                                    seen_ms.add(s)
+                        msrc = source_display(meta_sources)
+                        if len(msrc) > sw:
+                            msrc = '…' + msrc[-(sw - 1):]
+                        print(f"  {label:<{w}} {fmt_size(ms):>9}  {fmt_size(mcp):>10}  {mrt:<8}  {msrc}")
 
         print()
 
