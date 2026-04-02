@@ -110,8 +110,8 @@ detail if you pass `--verbose`). This allows you to see in more detail what is b
 
 ## Requirements
 
-The target system has to run a bootc version 1.15.0 or later, that contains (the fix to use layer
-diff_ids)[https://github.com/bootc-dev/bootc/pull/2081].
+The target system has to run a bootc version 1.15.0 or later, that contains [the fix to use layer
+diff_ids](https://github.com/bootc-dev/bootc/pull/2081).
 
 The required support in tar-diff has been merged in [PR #66](https://github.com/containers/tar-diff/pull/66) and is
 available in the current main branch. This is not yet in a release, but will be in the release after 0.3.1.
