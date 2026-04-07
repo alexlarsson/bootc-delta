@@ -279,6 +279,26 @@ func computeLayerDiffsParallel(opts *CreateOptions, old *OCIImage, new *OCIImage
 		layers = append(layers, d)
 	}
 
+	// Pre-analyze old layers once (shared across all diffs)
+	opts.Debug("  Analyzing source layers...")
+	diffOpts := tardiff.NewOptions()
+	diffOpts.SetIgnoreSourcePrefixes([]string{"sysroot/ostree/"})
+	diffOpts.SetApplyWhiteouts(true)
+
+	var oldFiles []io.ReadSeeker
+	for _, layer := range old.layers {
+		r, err := old.tarIndex.GetReader(blobTarName(layer.Digest))
+		if err != nil {
+			return nil, fmt.Errorf("failed to get old layer reader: %w", err)
+		}
+		oldFiles = append(oldFiles, r)
+	}
+
+	sources, err := tardiff.AnalyzeSources(oldFiles, diffOpts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to analyze sources: %w", err)
+	}
+
 	results := make([]layerDiffResult, len(layers))
 	errs := make([]error, len(layers))
 
@@ -297,7 +317,7 @@ func computeLayerDiffsParallel(opts *CreateOptions, old *OCIImage, new *OCIImage
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			results[i], errs[i] = computeLayerDiff(opts, old, new, d, i+1, total, tmpDir)
+			results[i], errs[i] = computeLayerDiff(opts, old, new, d, i+1, total, tmpDir, sources, diffOpts)
 		}()
 	}
 
@@ -317,7 +337,7 @@ func computeLayerDiffsParallel(opts *CreateOptions, old *OCIImage, new *OCIImage
 	return results, nil
 }
 
-func computeLayerDiff(opts *CreateOptions, old *OCIImage, new *OCIImage, blobDigest digest.Digest, layerNum, total int, tmpDir string) (layerDiffResult, error) {
+func computeLayerDiff(opts *CreateOptions, old *OCIImage, new *OCIImage, blobDigest digest.Digest, layerNum, total int, tmpDir string, sources *tardiff.SourceAnalysis, diffOpts *tardiff.Options) (layerDiffResult, error) {
 	originalSize, err := new.tarIndex.GetSize(blobTarName(blobDigest))
 	if err != nil {
 		return layerDiffResult{}, fmt.Errorf("failed to get layer size %s: %w", blobDigest.Encoded()[:16], err)
@@ -332,7 +352,7 @@ func computeLayerDiff(opts *CreateOptions, old *OCIImage, new *OCIImage, blobDig
 	diffPath := tmpFile.Name()
 	tmpFile.Close()
 
-	if err := runTarDiff(old, new, blobDigest, diffPath); err != nil {
+	if err := runTarDiff(old, new, blobDigest, diffPath, sources, diffOpts); err != nil {
 		opts.Warning("tar-diff failed for layer %s: %v, using original", blobDigest.Encoded()[:16], err)
 		os.Remove(diffPath)
 		return layerDiffResult{digest: blobDigest, originalSize: originalSize}, nil
@@ -353,7 +373,7 @@ func computeLayerDiff(opts *CreateOptions, old *OCIImage, new *OCIImage, blobDig
 	return layerDiffResult{digest: blobDigest, originalSize: originalSize, diffPath: diffPath, diffSize: info.Size(), diffDigest: diffDigest}, nil
 }
 
-func runTarDiff(old *OCIImage, new *OCIImage, newLayerDigest digest.Digest, output string) error {
+func runTarDiff(old *OCIImage, new *OCIImage, newLayerDigest digest.Digest, output string, sources *tardiff.SourceAnalysis, diffOpts *tardiff.Options) error {
 	var oldFiles []io.ReadSeeker
 
 	// Get readers for all old image layers
@@ -377,8 +397,5 @@ func runTarDiff(old *OCIImage, new *OCIImage, newLayerDigest digest.Digest, outp
 	}
 	defer outFile.Close()
 
-	opts := tardiff.NewOptions()
-	opts.SetIgnoreSourcePrefixes([]string{"sysroot/ostree/"})
-
-	return tardiff.Diff(oldFiles, newFile, outFile, opts)
+	return tardiff.DiffWithSources(sources, oldFiles, newFile, outFile, diffOpts)
 }
