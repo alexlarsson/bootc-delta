@@ -2,6 +2,8 @@ module github.com/containers/bootc-delta
 
 go 1.25
 
+replace github.com/containers/tar-diff => github.com/alexlarsson/tar-diff v0.0.0-20260408131202-e8b833033ecd
+
 require (
 	github.com/containers/tar-diff v0.3.2-0.20260327202027-0f8dcdfabbd9
 	github.com/opencontainers/go-digest v1.0.0
