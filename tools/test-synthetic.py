@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Synthetic bootc OCI image test for bootc-delta.
+Synthetic bootc OCI image test for oci-delta.
 
 Creates minimal OCI images replicating real bootc layer structure, then
 tests delta creation and application against all corner cases:
@@ -199,9 +199,9 @@ def run(cmd: list, **kwargs) -> subprocess.CompletedProcess:
 
 def main():
     script_dir = Path(__file__).parent
-    bootc_delta = script_dir.parent / 'bootc-delta'
-    if not bootc_delta.exists():
-        print(f"ERROR: {bootc_delta} not found — run 'make build' first", file=sys.stderr)
+    oci_delta = script_dir.parent / 'oci-delta'
+    if not oci_delta.exists():
+        print(f"ERROR: {oci_delta} not found — run 'make build' first", file=sys.stderr)
         sys.exit(1)
 
     # ------------------------------------------------------------------ #
@@ -318,7 +318,7 @@ def main():
     # Run tests                                                            #
     # ------------------------------------------------------------------ #
 
-    with tempfile.TemporaryDirectory(prefix='bootc-delta-test-') as tmp:
+    with tempfile.TemporaryDirectory(prefix='oci-delta-test-') as tmp:
         old_img       = os.path.join(tmp, 'old.oci-archive')
         new_img       = os.path.join(tmp, 'new.oci-archive')
         delta         = os.path.join(tmp, 'delta.tar')
@@ -331,7 +331,7 @@ def main():
 
         # ---- Test 1+2: delta creation skips identical and recompressed layers ----
         print("\n[Test 1+2] Delta creation: identical and recompressed layers are skipped")
-        result = run([str(bootc_delta), 'create', '-v', old_img, new_img, delta])
+        result = run([str(oci_delta), 'create', '-v', old_img, new_img, delta])
         stats = result.stdout
         check('Skipped layers:   2' in stats,
               'skipped 2 layers (identical + recompressed)')
@@ -344,7 +344,7 @@ def main():
         print("\n[Test 3] Apply: reconstructed archive has correct diff_ids")
         os.makedirs(delta_source)
         extract_ostree_objects(old_img, delta_source)
-        run([str(bootc_delta), 'apply',
+        run([str(oci_delta), 'apply',
              f'--delta-source={delta_source}', delta, reconstructed])
 
         expected_diff_ids = get_diff_ids(new_img)

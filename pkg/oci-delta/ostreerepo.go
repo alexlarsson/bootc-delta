@@ -1,4 +1,4 @@
-package bootcdelta
+package ocidelta
 
 // #cgo pkg-config: ostree-1
 // #include <ostree.h>
@@ -204,8 +204,8 @@ func enumerateDir(dir *C.GFile, prefix string, result map[string]string) error {
 	return nil
 }
 
-func NewOstreeRepoDataSource(repoPath string, ref string, debug func(format string, args ...interface{})) (*OstreeRepoDataSource, error) {
-	debug("Building file index from ostree ref %s", ref)
+func NewOstreeRepoDataSource(repoPath string, ref string, log Logger) (*OstreeRepoDataSource, error) {
+	log.Debug("Building file index from ostree ref %s", ref)
 
 	repo, err := openOstreeRepo(repoPath)
 	if err != nil {
@@ -218,7 +218,7 @@ func NewOstreeRepoDataSource(repoPath string, ref string, debug func(format stri
 		return nil, err
 	}
 
-	debug("Indexed %d files from ostree ref", len(pathToObj))
+	log.Debug("Indexed %d files from ostree ref", len(pathToObj))
 
 	return &OstreeRepoDataSource{
 		repoPath:  repoPath,
@@ -273,8 +273,8 @@ func (s *OstreeRepoDataSource) Close() error {
 
 var _ tarpatch.DataSource = (*OstreeRepoDataSource)(nil)
 
-func findOstreeRefByConfig(repoPath string, sourceConfigDigest string, debug func(format string, args ...interface{})) (string, error) {
-	debug("Looking for ostree ref with config digest %s", sourceConfigDigest)
+func findOstreeRefByConfig(repoPath string, sourceConfigDigest string, log Logger) (string, error) {
+	log.Debug("Looking for ostree ref with config digest %s", sourceConfigDigest)
 
 	repo, err := openOstreeRepo(repoPath)
 	if err != nil {
@@ -290,7 +290,7 @@ func findOstreeRefByConfig(repoPath string, sourceConfigDigest string, debug fun
 		return "", fmt.Errorf("no container image refs found in ostree repo")
 	}
 
-	debug("Found %d container image refs", len(refs))
+	log.Debug("Found %d container image refs", len(refs))
 
 	for _, ref := range refs {
 		manifestStr, err := getCommitMetadataString(repo, ref, "ostree.manifest")
@@ -307,10 +307,10 @@ func findOstreeRefByConfig(repoPath string, sourceConfigDigest string, debug fun
 			continue
 		}
 
-		debug("  Ref %s: config digest %s", ref, manifest.Config.Digest)
+		log.Debug("  Ref %s: config digest %s", ref, manifest.Config.Digest)
 
 		if manifest.Config.Digest == sourceConfigDigest {
-			debug("Matched ref: %s", ref)
+			log.Debug("Matched ref: %s", ref)
 			return ref, nil
 		}
 	}
@@ -318,18 +318,12 @@ func findOstreeRefByConfig(repoPath string, sourceConfigDigest string, debug fun
 	return "", fmt.Errorf("no ostree ref found with config digest %s", sourceConfigDigest)
 }
 
-func resolveOstreeDataSource(repoPath string, sourceConfigDigest string, debug func(format string, args ...interface{})) (*OstreeRepoDataSource, error) {
-	ref, err := findOstreeRefByConfig(repoPath, sourceConfigDigest, debug)
+func resolveOstreeDataSource(repoPath string, sourceConfigDigest string, log Logger) (*OstreeRepoDataSource, error) {
+	ref, err := findOstreeRefByConfig(repoPath, sourceConfigDigest, log)
 	if err != nil {
 		return nil, err
 	}
 
-	return NewOstreeRepoDataSource(repoPath, ref, debug)
+	return NewOstreeRepoDataSource(repoPath, ref, log)
 }
 
-func getDataSource(opts *ApplyOptions, sourceConfigDigest string) (tarpatch.DataSource, error) {
-	if opts.DeltaSource != "" {
-		return tarpatch.NewFilesystemDataSource(opts.DeltaSource), nil
-	}
-	return resolveOstreeDataSource(opts.RepoPath, sourceConfigDigest, opts.Debug)
-}

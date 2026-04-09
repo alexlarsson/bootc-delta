@@ -27,10 +27,10 @@ if [ ! -f "$IMAGE2" ]; then
     exit 1
 fi
 
-TMPDIR=$(mktemp -d -t bootc-delta-test.XXXXXX)
+TMPDIR=$(mktemp -d -t oci-delta-test.XXXXXX)
 trap 'rm -rf "$TMPDIR"' EXIT
 
-DELTA_FILE="$TMPDIR/test.bootc-delta"
+DELTA_FILE="$TMPDIR/test.oci-delta"
 RECONSTRUCTED="$TMPDIR/reconstructed.oci-archive"
 OSTREE_REPO="$TMPDIR/ostree-repo"
 
@@ -41,7 +41,7 @@ python3 "$SCRIPT_DIR/create-ostree-repo.py" "$IMAGE1" "$OSTREE_REPO"
 
 echo ""
 echo "==> Creating delta: $IMAGE1 -> $IMAGE2"
-./bootc-delta create -verbose "$IMAGE1" "$IMAGE2" "$DELTA_FILE"
+./oci-delta create -verbose "$IMAGE1" "$IMAGE2" "$DELTA_FILE"
 
 if [ ! -f "$DELTA_FILE" ]; then
     echo "Error: Delta file was not created"
@@ -53,7 +53,7 @@ echo "Delta size: $DELTA_SIZE bytes"
 
 echo ""
 echo "==> Applying delta to reconstruct image"
-./bootc-delta apply -repo "$OSTREE_REPO" "$DELTA_FILE" "$RECONSTRUCTED"
+./oci-delta apply -repo "$OSTREE_REPO" "$DELTA_FILE" "$RECONSTRUCTED"
 
 if [ ! -f "$RECONSTRUCTED" ]; then
     echo "Error: Reconstructed archive was not created"

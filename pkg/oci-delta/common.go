@@ -1,4 +1,4 @@
-package bootcdelta
+package ocidelta
 
 import (
 	"archive/tar"
@@ -7,23 +7,64 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	digest "github.com/opencontainers/go-digest"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
-const (
-	mediaTypeDeltaConfig        = "application/vnd.redhat.bootc-delta.config.v1+json"
-	mediaTypeTarDiff            = "application/vnd.tar-diff"
-	annotationDeltaTarget       = "io.github.containers.delta.target"
-	annotationDeltaSource       = "io.github.containers.delta.source"
-	annotationDeltaSourceConfig = "io.github.containers.delta.source-config"
-	annotationDeltaTo           = "io.github.containers.delta.to"
-	annotationDeltaReused       = "io.github.containers.delta.reused"
-	annotationDeltaReusedDiffID = "io.github.containers.delta.reused-diff-id"
-)
+type Logger interface {
+	Debug(format string, args ...interface{})
+	Warning(format string, args ...interface{})
+}
 
 var ociLayoutFileData = []byte(`{"imageLayoutVersion":"1.0.0"}`)
+
+type BlobStore interface {
+	ReadFile(name string) (io.ReadSeekCloser, int64, error)
+	Close() error
+}
+
+type readSeekNopCloser struct {
+	io.ReadSeeker
+}
+
+func (readSeekNopCloser) Close() error { return nil }
+
+type DirBlobStore struct {
+	dir string
+}
+
+func NewDirBlobStore(dir string) *DirBlobStore {
+	return &DirBlobStore{dir: dir}
+}
+
+func (d *DirBlobStore) ReadFile(name string) (io.ReadSeekCloser, int64, error) {
+	f, err := os.Open(d.dir + "/" + name)
+	if err != nil {
+		return nil, 0, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, 0, err
+	}
+	return f, info.Size(), nil
+}
+
+func (d *DirBlobStore) Close() error {
+	return nil
+}
+
+func OpenBlobStore(ref string) (BlobStore, error) {
+	if strings.HasPrefix(ref, "oci-archive:") {
+		return indexTarArchive(ref[len("oci-archive:"):])
+	}
+	if strings.HasPrefix(ref, "oci:") {
+		return NewDirBlobStore(ref[len("oci:"):]), nil
+	}
+	return indexTarArchive(ref)
+}
 
 type TarIndex struct {
 	file    *os.File
@@ -48,7 +89,7 @@ type OCIImage struct {
 	layers         []OCILayer
 	layerByDigest  map[digest.Digest]*OCILayer
 	layerByDiffID  map[digest.Digest]*OCILayer
-	tarIndex       *TarIndex
+	blobStore      BlobStore
 }
 
 type offsetTracker struct {
@@ -104,33 +145,13 @@ func indexTarArchive(path string) (*TarIndex, error) {
 	}, nil
 }
 
-func (idx *TarIndex) ReadFile(name string) ([]byte, error) {
+func (idx *TarIndex) ReadFile(name string) (io.ReadSeekCloser, int64, error) {
 	entry, ok := idx.entries[name]
 	if !ok {
-		return nil, fmt.Errorf("file not found in tar: %s", name)
+		return nil, 0, fmt.Errorf("file not found in tar: %s", name)
 	}
 
-	data := make([]byte, entry.size)
-	_, err := idx.file.ReadAt(data, entry.offset)
-	return data, err
-}
-
-func (idx *TarIndex) GetReader(name string) (io.ReadSeeker, error) {
-	entry, ok := idx.entries[name]
-	if !ok {
-		return nil, fmt.Errorf("file not found in tar: %s", name)
-	}
-
-	// SectionReader uses ReadAt which is thread-safe
-	return io.NewSectionReader(idx.file, entry.offset, entry.size), nil
-}
-
-func (idx *TarIndex) GetSize(name string) (int64, error) {
-	entry, ok := idx.entries[name]
-	if !ok {
-		return 0, fmt.Errorf("file not found in tar: %s", name)
-	}
-	return entry.size, nil
+	return readSeekNopCloser{io.NewSectionReader(idx.file, entry.offset, entry.size)}, entry.size, nil
 }
 
 func (idx *TarIndex) Close() error {
@@ -140,8 +161,17 @@ func (idx *TarIndex) Close() error {
 	return nil
 }
 
-func parseOCIImage(tarIndex *TarIndex) (*OCIImage, error) {
-	indexData, err := tarIndex.ReadFile("index.json")
+func readAllFromStore(store BlobStore, name string) ([]byte, error) {
+	r, _, err := store.ReadFile(name)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	return io.ReadAll(r)
+}
+
+func parseOCIImage(blobStore BlobStore) (*OCIImage, error) {
+	indexData, err := readAllFromStore(blobStore, "index.json")
 	if err != nil {
 		return nil, fmt.Errorf("failed to read index.json: %w", err)
 	}
@@ -163,8 +193,7 @@ func parseOCIImage(tarIndex *TarIndex) (*OCIImage, error) {
 		return nil, fmt.Errorf("OCI archive contains multiple manifests (%d), only single-image archives are supported", len(index.Manifests))
 	}
 
-	// Read the manifest
-	manifestData, err := tarIndex.ReadFile(blobTarName(manifestDesc.Digest))
+	manifestData, err := readAllFromStore(blobStore, blobTarName(manifestDesc.Digest))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read manifest: %w", err)
 	}
@@ -174,12 +203,11 @@ func parseOCIImage(tarIndex *TarIndex) (*OCIImage, error) {
 		return nil, fmt.Errorf("failed to parse manifest: %w", err)
 	}
 
-	// Read config to get diff_ids.
 	if manifest.Config.Digest == "" {
 		return nil, fmt.Errorf("manifest has no config digest")
 	}
 
-	configData, err := tarIndex.ReadFile(blobTarName(manifest.Config.Digest))
+	configData, err := readAllFromStore(blobStore, blobTarName(manifest.Config.Digest))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config: %w", err)
 	}
@@ -211,7 +239,7 @@ func parseOCIImage(tarIndex *TarIndex) (*OCIImage, error) {
 		layers:         layers,
 		layerByDigest:  layerByDigest,
 		layerByDiffID:  layerByDiffID,
-		tarIndex:       tarIndex,
+		blobStore:      blobStore,
 	}, nil
 }
 
@@ -292,16 +320,13 @@ func copyTarEntry(w *tar.Writer, header *tar.Header, r io.Reader) error {
 	return err
 }
 
-func writeBlobTarFile(w *tar.Writer, tarIndex *TarIndex, d digest.Digest) error {
+func writeBlobTarFile(w *tar.Writer, store BlobStore, d digest.Digest) error {
 	name := blobTarName(d)
-	size, err := tarIndex.GetSize(name)
+	r, size, err := store.ReadFile(name)
 	if err != nil {
 		return err
 	}
-	r, err := tarIndex.GetReader(name)
-	if err != nil {
-		return err
-	}
+	defer r.Close()
 	return writeTarFileFromReader(w, name, size, r)
 }
 

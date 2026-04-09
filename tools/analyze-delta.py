@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Analyze a bootc-delta file and print information about its layers."""
+"""Analyze a oci-delta file and print information about its layers."""
 
 import argparse
 import io
@@ -68,7 +68,7 @@ class TarIndex:
             return f.read(size)
 
 
-MEDIA_DELTA_CONFIG   = "application/vnd.redhat.bootc-delta.config.v1+json"
+MEDIA_DELTA_CONFIG   = "application/vnd.redhat.oci-delta.config.v1+json"
 MEDIA_TAR_DIFF       = "application/vnd.tar-diff"
 MEDIA_IMAGE_MANIFEST = "application/vnd.oci.image.manifest.v1+json"
 MEDIA_IMAGE_CONFIG   = "application/vnd.oci.image.config.v1+json"
@@ -92,7 +92,7 @@ def open_delta(path):
     delta_manifest = json.loads(idx.read(blob_path(delta_manifest_digest)))
 
     if delta_manifest.get('config', {}).get('mediaType') != MEDIA_DELTA_CONFIG:
-        sys.exit("error: not a bootc-delta file (unexpected config mediaType)")
+        sys.exit("error: not a oci-delta file (unexpected config mediaType)")
 
     image_manifest_desc = None
     image_config_desc = None
@@ -548,7 +548,7 @@ def report(delta_path, verbose):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('delta', help="path to the bootc-delta file")
+    ap.add_argument('delta', help="path to the oci-delta file")
     ap.add_argument('--verbose', '-v', action='store_true',
                     help="list all regular files in each delta layer")
     args = ap.parse_args()
