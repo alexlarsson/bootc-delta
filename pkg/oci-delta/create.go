@@ -223,6 +223,12 @@ func CreateDelta(opts CreateOptions, log Logger) (*CreateStats, error) {
 	if err := writeTarFile(tarWriter, "oci-layout", ociLayoutFileData); err != nil {
 		return nil, err
 	}
+	if err := writeTarDir(tarWriter, "blobs/"); err != nil {
+		return nil, err
+	}
+	if err := writeTarDir(tarWriter, "blobs/sha256/"); err != nil {
+		return nil, err
+	}
 
 	log.Debug("Writing image manifest and config blobs")
 	if err := writeTarFile(tarWriter, blobTarName(imageManifestDesc.Digest), imageManifestData); err != nil {

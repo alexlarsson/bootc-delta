@@ -275,6 +275,14 @@ func writeTarMember(w *tar.Writer, header *tar.Header, data []byte) error {
 	return err
 }
 
+func writeTarDir(w *tar.Writer, name string) error {
+	return w.WriteHeader(&tar.Header{
+		Typeflag: tar.TypeDir,
+		Name:     name,
+		Mode:     0755,
+	})
+}
+
 func writeTarFile(w *tar.Writer, name string, data []byte) error {
 	header := &tar.Header{
 		Name: name,

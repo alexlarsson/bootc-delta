@@ -83,6 +83,12 @@ func ApplyDelta(opts ApplyOptions, log Logger) error {
 	if err := writeTarFile(tarWriter, "oci-layout", ociLayoutFileData); err != nil {
 		return err
 	}
+	if err := writeTarDir(tarWriter, "blobs/"); err != nil {
+		return err
+	}
+	if err := writeTarDir(tarWriter, "blobs/sha256/"); err != nil {
+		return err
+	}
 
 	// Write image config blob (unchanged).
 	if err := delta.WriteBlobToTar(tarWriter, delta.imageConfigDigest); err != nil {
