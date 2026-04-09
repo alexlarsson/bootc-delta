@@ -1,0 +1,88 @@
+package bootcdelta
+
+import (
+	"encoding/json"
+	"fmt"
+
+	"github.com/containers/storage"
+	"github.com/containers/storage/types"
+	tarpatch "github.com/containers/tar-diff/pkg/tar-patch"
+)
+
+type containerStorageDataSource struct {
+	tarpatch.DataSource
+	store   storage.Store
+	imageID string
+}
+
+func (s *containerStorageDataSource) Cleanup() error {
+	_, err := s.store.UnmountImage(s.imageID, true)
+	return err
+}
+
+func OpenContainerStorage(graphRoot string) (storage.Store, error) {
+	storeOpts, err := types.DefaultStoreOptions()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get default store options: %w", err)
+	}
+	if graphRoot != "" {
+		storeOpts.GraphRoot = graphRoot
+	}
+
+	store, err := storage.GetStore(storeOpts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open container storage: %w", err)
+	}
+	return store, nil
+}
+
+func resolveContainerStorageDataSource(store storage.Store, sourceConfigDigest string, debug func(format string, args ...interface{})) (*containerStorageDataSource, error) {
+	images, err := store.Images()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list images: %w", err)
+	}
+
+	debug("Found %d images in container storage", len(images))
+
+	var matchedID string
+	for _, img := range images {
+		manifestData, err := store.ImageBigData(img.ID, "manifest")
+		if err != nil {
+			continue
+		}
+
+		var manifest struct {
+			Config struct {
+				Digest string `json:"digest"`
+			} `json:"config"`
+		}
+		if err := json.Unmarshal(manifestData, &manifest); err != nil {
+			continue
+		}
+
+		debug("  Image %s: config digest %s", img.ID[:16], manifest.Config.Digest)
+
+		if manifest.Config.Digest == sourceConfigDigest {
+			debug("Matched image: %s", img.ID[:16])
+			matchedID = img.ID
+			break
+		}
+	}
+
+	if matchedID == "" {
+		return nil, fmt.Errorf("no image found with config digest %s", sourceConfigDigest)
+	}
+
+	mountPoint, err := store.MountImage(matchedID, nil, "")
+	if err != nil {
+		return nil, fmt.Errorf("failed to mount image %s: %w", matchedID[:16], err)
+	}
+
+	debug("Mounted image at %s", mountPoint)
+
+	return &containerStorageDataSource{
+		DataSource: tarpatch.NewFilesystemDataSource(mountPoint),
+		store:      store,
+		imageID:    matchedID,
+	}, nil
+}
