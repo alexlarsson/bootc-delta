@@ -37,22 +37,22 @@ type CreateStats struct {
 func CreateDelta(opts CreateOptions, log Logger) (*CreateStats, error) {
 	stats := &CreateStats{}
 
-	log.Debug("Indexing old image: %s", opts.OldImage)
-	oldTarIndex, err := indexTarArchive(opts.OldImage)
+	log.Debug("Opening old image: %s", opts.OldImage)
+	oldStore, err := OpenBlobStore(opts.OldImage)
 	if err != nil {
-		return nil, fmt.Errorf("failed to index old image: %w", err)
+		return nil, fmt.Errorf("failed to open old image: %w", err)
 	}
-	defer oldTarIndex.Close()
+	defer oldStore.Close()
 
-	log.Debug("Indexing new image: %s", opts.NewImage)
-	newTarIndex, err := indexTarArchive(opts.NewImage)
+	log.Debug("Opening new image: %s", opts.NewImage)
+	newStore, err := OpenBlobStore(opts.NewImage)
 	if err != nil {
-		return nil, fmt.Errorf("failed to index new image: %w", err)
+		return nil, fmt.Errorf("failed to open new image: %w", err)
 	}
-	defer newTarIndex.Close()
+	defer newStore.Close()
 
 	log.Debug("Parsing old image")
-	old, err := parseOCIImage(oldTarIndex)
+	old, err := parseOCIImage(oldStore)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse old image: %w", err)
 	}
@@ -60,7 +60,7 @@ func CreateDelta(opts CreateOptions, log Logger) (*CreateStats, error) {
 	log.Debug("  Found %d layers in old image", stats.OldLayers)
 
 	log.Debug("Parsing new image")
-	new, err := parseOCIImage(newTarIndex)
+	new, err := parseOCIImage(newStore)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse new image: %w", err)
 	}
@@ -105,11 +105,11 @@ func CreateDelta(opts CreateOptions, log Logger) (*CreateStats, error) {
 
 	// Read embedded image manifest and config data.
 	imageManifestDesc := new.index.Manifests[0]
-	imageManifestData, err := new.tarIndex.ReadFile(blobTarName(imageManifestDesc.Digest))
+	imageManifestData, err := readAllFromStore(new.blobStore, blobTarName(imageManifestDesc.Digest))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read new image manifest: %w", err)
 	}
-	imageConfigData, err := new.tarIndex.ReadFile(blobTarName(new.manifest.Config.Digest))
+	imageConfigData, err := readAllFromStore(new.blobStore, blobTarName(new.manifest.Config.Digest))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read new image config: %w", err)
 	}
@@ -243,7 +243,7 @@ func CreateDelta(opts CreateOptions, log Logger) (*CreateStats, error) {
 				return nil, err
 			}
 		} else {
-			if err := writeBlobTarFile(tarWriter, new.tarIndex, r.digest); err != nil {
+			if err := writeBlobTarFile(tarWriter, new.blobStore, r.digest); err != nil {
 				return nil, err
 			}
 		}
@@ -286,10 +286,11 @@ func computeLayerDiffsParallel(log Logger, old *OCIImage, new *OCIImage, newOnly
 
 	var oldFiles []io.ReadSeeker
 	for _, layer := range old.layers {
-		r, err := old.tarIndex.GetReader(blobTarName(layer.Digest))
+		r, _, err := old.blobStore.ReadFile(blobTarName(layer.Digest))
 		if err != nil {
 			return nil, fmt.Errorf("failed to get old layer reader: %w", err)
 		}
+		defer r.Close()
 		oldFiles = append(oldFiles, r)
 	}
 
@@ -336,10 +337,11 @@ func computeLayerDiffsParallel(log Logger, old *OCIImage, new *OCIImage, newOnly
 }
 
 func computeLayerDiff(log Logger, old *OCIImage, new *OCIImage, blobDigest digest.Digest, layerNum, total int, tmpDir string, sources *tardiff.SourceAnalysis, diffOpts *tardiff.Options) (layerDiffResult, error) {
-	originalSize, err := new.tarIndex.GetSize(blobTarName(blobDigest))
+	sizeReader, originalSize, err := new.blobStore.ReadFile(blobTarName(blobDigest))
 	if err != nil {
 		return layerDiffResult{}, fmt.Errorf("failed to get layer size %s: %w", blobDigest.Encoded()[:16], err)
 	}
+	sizeReader.Close()
 
 	log.Debug("  Computing diff for layer %d/%d %s (%d bytes)", layerNum, total, blobDigest.Encoded()[:16], originalSize)
 
@@ -374,20 +376,20 @@ func computeLayerDiff(log Logger, old *OCIImage, new *OCIImage, blobDigest diges
 func runTarDiff(old *OCIImage, new *OCIImage, newLayerDigest digest.Digest, output string, sources *tardiff.SourceAnalysis, diffOpts *tardiff.Options) error {
 	var oldFiles []io.ReadSeeker
 
-	// Get readers for all old image layers
 	for _, layer := range old.layers {
-		r, err := old.tarIndex.GetReader(blobTarName(layer.Digest))
+		r, _, err := old.blobStore.ReadFile(blobTarName(layer.Digest))
 		if err != nil {
 			return err
 		}
+		defer r.Close()
 		oldFiles = append(oldFiles, r)
 	}
 
-	// Get reader for new layer
-	newFile, err := new.tarIndex.GetReader(blobTarName(newLayerDigest))
+	newFile, _, err := new.blobStore.ReadFile(blobTarName(newLayerDigest))
 	if err != nil {
 		return err
 	}
+	defer newFile.Close()
 
 	outFile, err := os.Create(output)
 	if err != nil {

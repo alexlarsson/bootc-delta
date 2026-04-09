@@ -81,11 +81,12 @@ func createCommand(args []string) error {
 
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "Usage: bootc-delta create [OPTIONS] <old-image> <new-image> <output>")
-		fmt.Fprintln(os.Stderr, "\nCreate a delta between two OCI image archives.")
+		fmt.Fprintln(os.Stderr, "\nCreate a delta between two OCI images.")
 		fmt.Fprintln(os.Stderr, "\nArguments:")
-		fmt.Fprintln(os.Stderr, "  <old-image>   Path to the old OCI archive")
-		fmt.Fprintln(os.Stderr, "  <new-image>   Path to the new OCI archive")
+		fmt.Fprintln(os.Stderr, "  <old-image>   Old image (oci-archive:path or oci:path)")
+		fmt.Fprintln(os.Stderr, "  <new-image>   New image (oci-archive:path or oci:path)")
 		fmt.Fprintln(os.Stderr, "  <output>      Path for the output delta file")
+		fmt.Fprintln(os.Stderr, "\nIf no type prefix is given, oci-archive: is assumed.")
 		fmt.Fprintln(os.Stderr, "\nOptions:")
 		fs.PrintDefaults()
 	}
