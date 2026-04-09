@@ -1,4 +1,4 @@
-package bootcdelta
+package ocidelta
 
 // #cgo pkg-config: ostree-1
 // #include <ostree.h>

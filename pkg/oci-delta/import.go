@@ -1,4 +1,4 @@
-package bootcdelta
+package ocidelta
 
 import (
 	"compress/gzip"
@@ -170,7 +170,7 @@ func reuseStorageLayer(store storage.Store, diffID digest.Digest, parentLayerID 
 		if err != nil {
 			return nil, fmt.Errorf("failed to extract layer diff: %w", err)
 		}
-		tmpFile, err := os.CreateTemp(tmpDir, "bootc-delta-layer-*.tar")
+		tmpFile, err := os.CreateTemp(tmpDir, "oci-delta-layer-*.tar")
 		if err != nil {
 			diffReader.Close()
 			return nil, fmt.Errorf("failed to create temp file: %w", err)

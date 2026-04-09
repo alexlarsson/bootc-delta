@@ -1,4 +1,4 @@
-package bootcdelta
+package ocidelta
 
 import (
 	tarpatch "github.com/containers/tar-diff/pkg/tar-patch"

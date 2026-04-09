@@ -1,4 +1,4 @@
-package bootcdelta
+package ocidelta
 
 import (
 	"archive/tar"
@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	mediaTypeDeltaConfig        = "application/vnd.redhat.bootc-delta.config.v1+json"
+	mediaTypeDeltaConfig        = "application/vnd.redhat.oci-delta.config.v1+json"
 	mediaTypeTarDiff            = "application/vnd.tar-diff"
 	annotationDeltaTarget       = "io.github.containers.delta.target"
 	annotationDeltaSource       = "io.github.containers.delta.source"

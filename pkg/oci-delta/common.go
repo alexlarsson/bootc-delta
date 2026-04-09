@@ -1,4 +1,4 @@
-package bootcdelta
+package ocidelta
 
 import (
 	"archive/tar"

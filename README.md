@@ -1,6 +1,6 @@
-# bootc-delta
+# oci-delta
 
-bootc-delta is a tool to take two oci archive files, called the "old and "new" image below)
+oci-delta is a tool to take two oci archive files, called the "old and "new" image below)
 containing bootc images and producing a resulting file, called a "delta" that can be used to update
 a bootc host with the old image installed to the new image, without having the new oci archive
 available.  The advantage of using the delta is that it is significantly smaller, as it avoids
@@ -18,7 +18,7 @@ When bootc installs a new image (both when pulling from a registry or from an OC
 look at each layers digest id and diff_id comparing it to the set of already installed layers. If
 there is a match, the layer in the image isn't even looked at.
 
-This allows the first level of deltas in bootc-delta, we just generate a normal OCI image that
+This allows the first level of deltas in oci-delta, we just generate a normal OCI image that
 leaves out the tar files for the layers that will already be installed. Such an oci archive can be
 installed with a command like `bootc switch --transport oci-archive $FILE`.
 
@@ -67,12 +67,12 @@ are the same.
 
 Create a bootc delta from two oci archive.
 ```
-$ bootc-delta create old.oci-archive new.oci-archive update.bootc-delta
+$ oci-delta create old.oci-archive new.oci-archive update.oci-delta
 ```
 
 Apply a delta on a bootc system.
 ```
-$ bootc-delta create update.bootc-delta new.oci-archive
+$ oci-delta create update.oci-delta new.oci-archive
 $ bootc switch --transport=oci-archive new.oci-archive
 $ rm new.oci-archive
 ```
@@ -148,7 +148,7 @@ blobs/sha256/<layer-data-hash>      - one blob per changed layer (tar-diff or or
 ### Delta manifest
 
 The delta manifest is a standard OCI image manifest with config media type
-`application/vnd.redhat.bootc-delta.config.v1+json` and the following top-level annotations:
+`application/vnd.redhat.oci-delta.config.v1+json` and the following top-level annotations:
 
 | Annotation | Description |
 |---|---|

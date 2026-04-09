@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	bootcdelta "github.com/containers/bootc-delta/pkg/bootc-delta"
+	ocidelta "github.com/containers/oci-delta/pkg/oci-delta"
 	"github.com/containers/storage"
 	"github.com/containers/storage/pkg/reexec"
 )
@@ -30,14 +30,14 @@ func main() {
 	}
 
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "bootc-delta - Create and apply OCI image deltas\n\n")
+		fmt.Fprintf(os.Stderr, "oci-delta - Create and apply OCI image deltas\n\n")
 		fmt.Fprintf(os.Stderr, "Usage:\n")
-		fmt.Fprintf(os.Stderr, "  bootc-delta <subcommand> [OPTIONS] [ARGUMENTS]\n\n")
+		fmt.Fprintf(os.Stderr, "  oci-delta <subcommand> [OPTIONS] [ARGUMENTS]\n\n")
 		fmt.Fprintf(os.Stderr, "Subcommands:\n")
 		fmt.Fprintf(os.Stderr, "  create    Create a delta between two OCI images\n")
 		fmt.Fprintf(os.Stderr, "  apply     Apply a delta to create a standard OCI archive\n")
 		fmt.Fprintf(os.Stderr, "  import    Apply a delta and import the result into container storage\n\n")
-		fmt.Fprintf(os.Stderr, "Run 'bootc-delta <subcommand> -h' for subcommand-specific options.\n")
+		fmt.Fprintf(os.Stderr, "Run 'oci-delta <subcommand> -h' for subcommand-specific options.\n")
 	}
 
 	flag.Parse()
@@ -73,14 +73,14 @@ func main() {
 }
 
 func createCommand(args []string) error {
-	fs := flag.NewFlagSet("bootc-delta create", flag.ContinueOnError)
+	fs := flag.NewFlagSet("oci-delta create", flag.ContinueOnError)
 	verbose := fs.Bool("verbose", false, "show statistics after creation")
 	fs.BoolVar(verbose, "v", false, "show statistics after creation (shorthand)")
 	debug := fs.Bool("debug", false, "show detailed progress information")
 	parallelism := fs.Int("j", 0, "max parallel tar-diff workers (default: number of CPUs)")
 
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: bootc-delta create [OPTIONS] <old-image> <new-image> <output>")
+		fmt.Fprintln(os.Stderr, "Usage: oci-delta create [OPTIONS] <old-image> <new-image> <output>")
 		fmt.Fprintln(os.Stderr, "\nCreate a delta between two OCI images.")
 		fmt.Fprintln(os.Stderr, "\nArguments:")
 		fmt.Fprintln(os.Stderr, "  <old-image>   Old image (oci-archive:path or oci:path)")
@@ -103,14 +103,14 @@ func createCommand(args []string) error {
 		return fmt.Errorf("expected 3 arguments, got %d", fs.NArg())
 	}
 
-	tmpDir, err := os.MkdirTemp("/var/tmp", "bootc-delta-*")
+	tmpDir, err := os.MkdirTemp("/var/tmp", "oci-delta-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp directory: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
 	log := &cmdLogger{debug: *debug}
-	opts := bootcdelta.CreateOptions{
+	opts := ocidelta.CreateOptions{
 		OldImage:    fs.Arg(0),
 		NewImage:    fs.Arg(1),
 		OutputPath:  fs.Arg(2),
@@ -119,7 +119,7 @@ func createCommand(args []string) error {
 		Parallelism: *parallelism,
 	}
 
-	stats, err := bootcdelta.CreateDelta(opts, log)
+	stats, err := ocidelta.CreateDelta(opts, log)
 	if err != nil {
 		return err
 	}
@@ -144,14 +144,14 @@ func createCommand(args []string) error {
 }
 
 func applyCommand(args []string) error {
-	fs := flag.NewFlagSet("bootc-delta apply", flag.ContinueOnError)
+	fs := flag.NewFlagSet("oci-delta apply", flag.ContinueOnError)
 	repoPath := fs.String("repo", "/ostree/repo", "ostree repository path (auto-detects source ref via config digest)")
 	deltaSource := fs.String("delta-source", "", "source directory for delta reconstruction (alternative to -repo)")
 	containerStorage := fs.String("container-storage", "", "podman container storage root for delta reconstruction (alternative to -repo)")
 	debug := fs.Bool("debug", false, "show detailed progress information")
 
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: bootc-delta apply [OPTIONS] <delta-file> <output>")
+		fmt.Fprintln(os.Stderr, "Usage: oci-delta apply [OPTIONS] <delta-file> <output>")
 		fmt.Fprintln(os.Stderr, "\nApply a delta to reconstruct a full OCI archive.")
 		fmt.Fprintln(os.Stderr, "\nArguments:")
 		fmt.Fprintln(os.Stderr, "  <delta-file>  Path to the delta file")
@@ -195,21 +195,21 @@ func applyCommand(args []string) error {
 	var store storage.Store
 	if *containerStorage != "" {
 		var err error
-		store, err = bootcdelta.OpenContainerStorage(*containerStorage)
+		store, err = ocidelta.OpenContainerStorage(*containerStorage)
 		if err != nil {
 			return err
 		}
 		defer func() { store.Shutdown(false) }()
 	}
 
-	tmpDir, err := os.MkdirTemp("/var/tmp", "bootc-delta-*")
+	tmpDir, err := os.MkdirTemp("/var/tmp", "oci-delta-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp directory: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
 	log := &cmdLogger{debug: *debug}
-	opts := bootcdelta.ApplyOptions{
+	opts := ocidelta.ApplyOptions{
 		DeltaPath:      fs.Arg(0),
 		OutputPath:     fs.Arg(1),
 		RepoPath:       *repoPath,
@@ -218,17 +218,17 @@ func applyCommand(args []string) error {
 		TmpDir:         tmpDir,
 	}
 
-	return bootcdelta.ApplyDelta(opts, log)
+	return ocidelta.ApplyDelta(opts, log)
 }
 
 func importCommand(args []string) error {
-	fs := flag.NewFlagSet("bootc-delta import", flag.ContinueOnError)
+	fs := flag.NewFlagSet("oci-delta import", flag.ContinueOnError)
 	containerStorage := fs.String("container-storage", "", "podman container storage root (default: system default)")
 	tag := fs.String("t", "", "tag name for the imported image")
 	debug := fs.Bool("debug", false, "show detailed progress information")
 
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: bootc-delta import [OPTIONS] <delta-file>")
+		fmt.Fprintln(os.Stderr, "Usage: oci-delta import [OPTIONS] <delta-file>")
 		fmt.Fprintln(os.Stderr, "\nApply a delta and import the result into container storage.")
 		fmt.Fprintln(os.Stderr, "\nArguments:")
 		fmt.Fprintln(os.Stderr, "  <delta-file>  Path to the delta file")
@@ -248,27 +248,27 @@ func importCommand(args []string) error {
 		return fmt.Errorf("expected 1 argument, got %d", fs.NArg())
 	}
 
-	store, err := bootcdelta.OpenContainerStorage(*containerStorage)
+	store, err := ocidelta.OpenContainerStorage(*containerStorage)
 	if err != nil {
 		return err
 	}
 	defer func() { store.Shutdown(false) }()
 
-	tmpDir, err := os.MkdirTemp("/var/tmp", "bootc-delta-*")
+	tmpDir, err := os.MkdirTemp("/var/tmp", "oci-delta-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp directory: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
 	log := &cmdLogger{debug: *debug}
-	opts := bootcdelta.ImportOptions{
+	opts := ocidelta.ImportOptions{
 		DeltaPath: fs.Arg(0),
 		Store:     store,
 		Tag:       *tag,
 		TmpDir:    tmpDir,
 	}
 
-	imageID, err := bootcdelta.ImportDelta(opts, log)
+	imageID, err := ocidelta.ImportDelta(opts, log)
 	if err != nil {
 		return err
 	}

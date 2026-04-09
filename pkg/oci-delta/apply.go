@@ -1,4 +1,4 @@
-package bootcdelta
+package ocidelta
 
 import (
 	"archive/tar"
@@ -165,7 +165,7 @@ func ApplyDelta(opts ApplyOptions, log Logger) error {
 }
 
 func processLayerDiff(tmpDir string, log Logger, tarWriter *tar.Writer, tarDiffReader io.Reader, expectedDiffID digest.Digest, dataSource tarpatch.DataSource) (newDigest digest.Digest, newSize int64, err error) {
-	tmpFile, err := os.CreateTemp(tmpDir, "bootc-delta-layer-*.gz")
+	tmpFile, err := os.CreateTemp(tmpDir, "oci-delta-layer-*.gz")
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to create temp file: %w", err)
 	}

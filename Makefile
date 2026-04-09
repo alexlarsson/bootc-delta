@@ -1,10 +1,10 @@
 .PHONY: build clean test fmt
 
 build:
-	go build -o bootc-delta ./cmd/bootc-delta
+	go build -o oci-delta ./cmd/oci-delta
 
 clean:
-	rm -f bootc-delta
+	rm -f oci-delta
 
 test: build
 	go test ./...
@@ -14,4 +14,4 @@ fmt:
 	go fmt ./...
 
 install:
-	go install ./cmd/bootc-delta
+	go install ./cmd/oci-delta

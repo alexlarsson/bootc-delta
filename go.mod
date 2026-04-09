@@ -1,4 +1,4 @@
-module github.com/containers/bootc-delta
+module github.com/containers/oci-delta
 
 go 1.25
 

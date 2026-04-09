@@ -1,4 +1,4 @@
-package bootcdelta
+package ocidelta
 
 import (
 	"archive/tar"
@@ -345,7 +345,7 @@ func computeLayerDiff(log Logger, old *OCIImage, new *OCIImage, blobDigest diges
 
 	log.Debug("  Computing diff for layer %d/%d %s (%d bytes)", layerNum, total, blobDigest.Encoded()[:16], originalSize)
 
-	tmpFile, err := os.CreateTemp(tmpDir, "bootc-delta-*.tar-diff")
+	tmpFile, err := os.CreateTemp(tmpDir, "oci-delta-*.tar-diff")
 	if err != nil {
 		return layerDiffResult{}, fmt.Errorf("failed to create temp file: %w", err)
 	}
