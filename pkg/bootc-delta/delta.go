@@ -1,8 +1,10 @@
 package bootcdelta
 
 import (
+	"archive/tar"
 	"encoding/json"
 	"fmt"
+	"io"
 
 	digest "github.com/opencontainers/go-digest"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
@@ -21,25 +23,33 @@ const (
 
 // deltaArtifact holds the parsed contents of a delta OCI artifact.
 type deltaArtifact struct {
+	tarIndex            *TarIndex
 	imageManifest       v1.Manifest
 	imageConfig         v1.Image
 	imageManifestDigest digest.Digest
 	imageConfigDigest   digest.Digest
 	sourceConfigDigest  string
-	// deltaLayerByTo maps delta.to digest → delta manifest layer descriptor
-	deltaLayerByTo map[digest.Digest]v1.Descriptor
+	deltaLayerByTo      map[digest.Digest]v1.Descriptor
 }
 
-func parseDeltaArtifact(tarIndex *TarIndex, debug func(format string, args ...interface{}), warning func(format string, args ...interface{})) (*deltaArtifact, error) {
+func parseDeltaArtifact(path string, debug func(format string, args ...interface{}), warning func(format string, args ...interface{})) (*deltaArtifact, error) {
+	tarIndex, err := indexTarArchive(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to index delta file: %w", err)
+	}
+
 	indexData, err := tarIndex.ReadFile("index.json")
 	if err != nil {
+		tarIndex.Close()
 		return nil, fmt.Errorf("delta archive does not contain index.json")
 	}
 	var ociIndex v1.Index
 	if err := json.Unmarshal(indexData, &ociIndex); err != nil {
+		tarIndex.Close()
 		return nil, fmt.Errorf("failed to parse index.json: %w", err)
 	}
 	if len(ociIndex.Manifests) == 0 {
+		tarIndex.Close()
 		return nil, fmt.Errorf("delta archive contains no manifests")
 	}
 
@@ -48,13 +58,16 @@ func parseDeltaArtifact(tarIndex *TarIndex, debug func(format string, args ...in
 
 	deltaManifestData, err := tarIndex.ReadFile(blobTarName(deltaManifestDigest))
 	if err != nil {
+		tarIndex.Close()
 		return nil, fmt.Errorf("failed to read delta manifest: %w", err)
 	}
 	var deltaManifest v1.Manifest
 	if err := json.Unmarshal(deltaManifestData, &deltaManifest); err != nil {
+		tarIndex.Close()
 		return nil, fmt.Errorf("failed to parse delta manifest: %w", err)
 	}
 	if deltaManifest.Config.MediaType != mediaTypeDeltaConfig {
+		tarIndex.Close()
 		return nil, fmt.Errorf("not a delta artifact (config mediaType: %s)", deltaManifest.Config.MediaType)
 	}
 
@@ -83,33 +96,40 @@ func parseDeltaArtifact(tarIndex *TarIndex, debug func(format string, args ...in
 		}
 	}
 	if imageManifestDesc == nil {
+		tarIndex.Close()
 		return nil, fmt.Errorf("delta manifest contains no embedded image manifest layer")
 	}
 	if imageConfigDesc == nil {
+		tarIndex.Close()
 		return nil, fmt.Errorf("delta manifest contains no embedded image config layer")
 	}
 
 	imageManifestData, err := tarIndex.ReadFile(blobTarName(imageManifestDesc.Digest))
 	if err != nil {
+		tarIndex.Close()
 		return nil, fmt.Errorf("failed to read embedded image manifest: %w", err)
 	}
 	var imageManifest v1.Manifest
 	if err := json.Unmarshal(imageManifestData, &imageManifest); err != nil {
+		tarIndex.Close()
 		return nil, fmt.Errorf("failed to parse embedded image manifest: %w", err)
 	}
 	debug("  Image manifest: %s (%d layers)", imageManifestDesc.Digest.Encoded()[:16], len(imageManifest.Layers))
 
 	imageConfigData, err := tarIndex.ReadFile(blobTarName(imageConfigDesc.Digest))
 	if err != nil {
+		tarIndex.Close()
 		return nil, fmt.Errorf("failed to read embedded image config: %w", err)
 	}
 	var imageConfig v1.Image
 	if err := json.Unmarshal(imageConfigData, &imageConfig); err != nil {
+		tarIndex.Close()
 		return nil, fmt.Errorf("failed to parse embedded image config: %w", err)
 	}
 	debug("  Image config: %s (%d diff_ids)", imageConfigDesc.Digest.Encoded()[:16], len(imageConfig.RootFS.DiffIDs))
 
 	return &deltaArtifact{
+		tarIndex:            tarIndex,
 		imageManifest:       imageManifest,
 		imageConfig:         imageConfig,
 		imageManifestDigest: imageManifestDesc.Digest,
@@ -117,4 +137,24 @@ func parseDeltaArtifact(tarIndex *TarIndex, debug func(format string, args ...in
 		sourceConfigDigest:  sourceConfigDigest,
 		deltaLayerByTo:      deltaLayerByTo,
 	}, nil
+}
+
+func (d *deltaArtifact) Close() error {
+	return d.tarIndex.Close()
+}
+
+func (d *deltaArtifact) ReadBlob(dgst digest.Digest) ([]byte, error) {
+	return d.tarIndex.ReadFile(blobTarName(dgst))
+}
+
+func (d *deltaArtifact) GetBlobReader(dgst digest.Digest) (io.ReadSeeker, error) {
+	return d.tarIndex.GetReader(blobTarName(dgst))
+}
+
+func (d *deltaArtifact) GetBlobSize(dgst digest.Digest) (int64, error) {
+	return d.tarIndex.GetSize(blobTarName(dgst))
+}
+
+func (d *deltaArtifact) WriteBlobToTar(w *tar.Writer, dgst digest.Digest) error {
+	return writeBlobTarFile(w, d.tarIndex, dgst)
 }

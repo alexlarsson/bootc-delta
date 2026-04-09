@@ -53,20 +53,14 @@ func ApplyDelta(opts ApplyOptions) error {
 		opts.Debug("Ostree repo: %s", opts.RepoPath)
 	}
 
-	opts.Debug("\nIndexing delta file...")
-	deltaTarIndex, err := indexTarArchive(opts.DeltaPath)
-	if err != nil {
-		return fmt.Errorf("failed to index delta file: %w", err)
-	}
-	defer deltaTarIndex.Close()
-
-	opts.Debug("\nParsing delta artifact...")
-	artifact, err := parseDeltaArtifact(deltaTarIndex, opts.Debug, opts.Warning)
+	opts.Debug("\nParsing delta...")
+	delta, err := parseDeltaArtifact(opts.DeltaPath, opts.Debug, opts.Warning)
 	if err != nil {
 		return err
 	}
+	defer delta.Close()
 
-	dataSource, err := getDataSource(&opts, artifact.sourceConfigDigest)
+	dataSource, err := getDataSource(&opts, delta.sourceConfigDigest)
 	if err != nil {
 		return fmt.Errorf("failed to create data source: %w", err)
 	}
@@ -76,7 +70,7 @@ func ApplyDelta(opts ApplyOptions) error {
 	}()
 
 	// Reconstruct diff_id lookup from image config.
-	layerDiffIDs := artifact.imageConfig.RootFS.DiffIDs
+	layerDiffIDs := delta.imageConfig.RootFS.DiffIDs
 
 	outFile, err := os.Create(opts.OutputPath)
 	if err != nil {
@@ -93,18 +87,18 @@ func ApplyDelta(opts ApplyOptions) error {
 	}
 
 	// Write image config blob (unchanged).
-	if err := writeBlobTarFile(tarWriter, deltaTarIndex, artifact.imageConfigDigest); err != nil {
+	if err := delta.WriteBlobToTar(tarWriter, delta.imageConfigDigest); err != nil {
 		return fmt.Errorf("failed to write image config: %w", err)
 	}
 
 	// Process each layer in the image manifest.
 	// For reconstructed layers we need to remap the digest.
-	outputLayers := make([]v1.Descriptor, len(artifact.imageManifest.Layers))
-	copy(outputLayers, artifact.imageManifest.Layers)
+	outputLayers := make([]v1.Descriptor, len(delta.imageManifest.Layers))
+	copy(outputLayers, delta.imageManifest.Layers)
 
 	opts.Debug("\nProcessing layers...")
-	for i, layer := range artifact.imageManifest.Layers {
-		deltaLayer, inDelta := artifact.deltaLayerByTo[layer.Digest]
+	for i, layer := range delta.imageManifest.Layers {
+		deltaLayer, inDelta := delta.deltaLayerByTo[layer.Digest]
 		if !inDelta {
 			// Reused layer: keep original descriptor, no blob written.
 			opts.Debug("  Layer %s: skipped (not in delta)", layer.Digest.Encoded()[:16])
@@ -118,7 +112,7 @@ func ApplyDelta(opts ApplyOptions) error {
 
 		if deltaLayer.MediaType == mediaTypeTarDiff {
 			opts.Debug("  Layer %s: reconstructing from tar-diff", layer.Digest.Encoded()[:16])
-			r, err := deltaTarIndex.GetReader(blobTarName(deltaLayer.Digest))
+			r, err := delta.GetBlobReader(deltaLayer.Digest)
 			if err != nil {
 				return fmt.Errorf("failed to read tar-diff for layer %s: %w", layer.Digest.Encoded()[:16], err)
 			}
@@ -130,7 +124,7 @@ func ApplyDelta(opts ApplyOptions) error {
 			outputLayers[i].Size = newSize
 		} else {
 			opts.Debug("  Layer %s: copying original (%d bytes)", layer.Digest.Encoded()[:16], deltaLayer.Size)
-			if err := writeBlobTarFile(tarWriter, deltaTarIndex, layer.Digest); err != nil {
+			if err := delta.WriteBlobToTar(tarWriter, layer.Digest); err != nil {
 				return fmt.Errorf("failed to copy layer %s: %w", layer.Digest.Encoded()[:16], err)
 			}
 		}
@@ -138,7 +132,7 @@ func ApplyDelta(opts ApplyOptions) error {
 
 	// Build and write the output image manifest.
 	opts.Debug("\nWriting output image manifest...")
-	outputManifest := artifact.imageManifest
+	outputManifest := delta.imageManifest
 	outputManifest.Layers = outputLayers
 	outputManifestData, err := json.Marshal(outputManifest)
 	if err != nil {
