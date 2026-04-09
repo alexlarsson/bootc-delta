@@ -7,9 +7,14 @@ import (
 
 	bootcdelta "github.com/containers/bootc-delta/pkg/bootc-delta"
 	"github.com/containers/storage"
+	"github.com/containers/storage/pkg/reexec"
 )
 
 func main() {
+	if reexec.Init() {
+		return
+	}
+
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "bootc-delta - Create and apply OCI image deltas\n\n")
 		fmt.Fprintf(os.Stderr, "Usage:\n")
