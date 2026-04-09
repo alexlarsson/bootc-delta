@@ -12,6 +12,11 @@ import (
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
+type Logger interface {
+	Debug(format string, args ...interface{})
+	Warning(format string, args ...interface{})
+}
+
 var ociLayoutFileData = []byte(`{"imageLayoutVersion":"1.0.0"}`)
 
 type TarIndex struct {

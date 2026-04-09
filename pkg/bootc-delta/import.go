@@ -18,21 +18,19 @@ type ImportOptions struct {
 	Store     storage.Store
 	Tag       string
 	TmpDir    string
-	Debug     func(format string, args ...interface{})
-	Warning   func(format string, args ...interface{})
 }
 
-func ImportDelta(opts ImportOptions) (string, error) {
-	opts.Debug("Importing delta: %s", opts.DeltaPath)
+func ImportDelta(opts ImportOptions, log Logger) (string, error) {
+	log.Debug("Importing delta: %s", opts.DeltaPath)
 
-	opts.Debug("\nParsing delta artifact...")
-	delta, err := parseDeltaArtifact(opts.DeltaPath, opts.Debug, opts.Warning)
+	log.Debug("\nParsing delta artifact...")
+	delta, err := parseDeltaArtifact(opts.DeltaPath, log)
 	if err != nil {
 		return "", err
 	}
 	defer delta.Close()
 
-	dataSource, err := resolveContainerStorageDataSource(opts.Store, delta.sourceConfigDigest, opts.Debug)
+	dataSource, err := resolveContainerStorageDataSource(opts.Store, delta.sourceConfigDigest, log)
 	if err != nil {
 		return "", fmt.Errorf("failed to create data source: %w", err)
 	}
@@ -45,7 +43,7 @@ func ImportDelta(opts ImportOptions) (string, error) {
 	parentLayerID := ""
 	storageLayers := make([]*storage.Layer, len(delta.imageManifest.Layers))
 
-	opts.Debug("\nProcessing layers...")
+	log.Debug("\nProcessing layers...")
 	for i, layer := range delta.imageManifest.Layers {
 		var diffID digest.Digest
 		if i < len(layerDiffIDs) {
@@ -54,14 +52,14 @@ func ImportDelta(opts ImportOptions) (string, error) {
 
 		deltaLayer, inDelta := delta.deltaLayerByTo[layer.Digest]
 		if !inDelta {
-			sl, err := reuseStorageLayer(opts.Store, diffID, parentLayerID, opts.TmpDir, opts.Debug)
+			sl, err := reuseStorageLayer(opts.Store, diffID, parentLayerID, opts.TmpDir, log)
 			if err != nil {
 				return "", err
 			}
 			storageLayers[i] = sl
 			parentLayerID = sl.ID
 		} else if deltaLayer.MediaType == mediaTypeTarDiff {
-			opts.Debug("  Layer %d: reconstructing from tar-diff", i)
+			log.Debug("  Layer %d: reconstructing from tar-diff", i)
 			r, err := delta.GetBlobReader(deltaLayer.Digest)
 			if err != nil {
 				return "", fmt.Errorf("failed to read tar-diff: %w", err)
@@ -79,9 +77,9 @@ func ImportDelta(opts ImportOptions) (string, error) {
 			}
 			storageLayers[i] = newLayer
 			parentLayerID = newLayer.ID
-			opts.Debug("    Created layer %s", newLayer.ID[:16])
+			log.Debug("    Created layer %s", newLayer.ID[:16])
 		} else {
-			opts.Debug("  Layer %d: importing original layer", i)
+			log.Debug("  Layer %d: importing original layer", i)
 			r, err := delta.GetBlobReader(layer.Digest)
 			if err != nil {
 				return "", fmt.Errorf("failed to read layer: %w", err)
@@ -98,7 +96,7 @@ func ImportDelta(opts ImportOptions) (string, error) {
 			}
 			storageLayers[i] = newLayer
 			parentLayerID = newLayer.ID
-			opts.Debug("    Created layer %s", newLayer.ID[:16])
+			log.Debug("    Created layer %s", newLayer.ID[:16])
 		}
 	}
 
@@ -129,7 +127,7 @@ func ImportDelta(opts ImportOptions) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to create image: %w", err)
 	}
-	opts.Debug("\nCreated image %s", image.ID)
+	log.Debug("\nCreated image %s", image.ID)
 
 	if err := opts.Store.SetImageBigData(image.ID, "manifest", manifestData, manifestDigestFunc); err != nil {
 		return "", fmt.Errorf("failed to store manifest: %w", err)
@@ -147,12 +145,12 @@ func ImportDelta(opts ImportOptions) (string, error) {
 		return "", fmt.Errorf("failed to store config: %w", err)
 	}
 
-	opts.Debug("Import complete!")
+	log.Debug("Import complete!")
 	return image.ID, nil
 }
 
-func reuseStorageLayer(store storage.Store, diffID digest.Digest, parentLayerID string, tmpDir string, debug func(format string, args ...interface{})) (*storage.Layer, error) {
-	debug("  Layer reused (diff_id %s)", diffID.Encoded()[:16])
+func reuseStorageLayer(store storage.Store, diffID digest.Digest, parentLayerID string, tmpDir string, log Logger) (*storage.Layer, error) {
+	log.Debug("  Layer reused (diff_id %s)", diffID.Encoded()[:16])
 
 	existing, err := store.LayersByUncompressedDigest(diffID)
 	if err != nil {
@@ -166,7 +164,7 @@ func reuseStorageLayer(store storage.Store, diffID digest.Digest, parentLayerID 
 	}
 
 	if len(existing) > 0 {
-		debug("    Recreating with correct parent chain")
+		log.Debug("    Recreating with correct parent chain")
 		el := existing[0]
 		diffReader, err := store.Diff(el.Parent, el.ID, nil)
 		if err != nil {

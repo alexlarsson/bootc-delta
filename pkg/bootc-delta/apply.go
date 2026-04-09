@@ -24,43 +24,41 @@ type ApplyOptions struct {
 	DeltaSource    string
 	ContainerStore storage.Store
 	TmpDir         string
-	Debug          func(format string, args ...interface{})
-	Warning        func(format string, args ...interface{})
 }
 
-func getDataSource(opts *ApplyOptions, sourceConfigDigest string) (deltaDataSource, error) {
+func getDataSource(opts *ApplyOptions, sourceConfigDigest string, log Logger) (deltaDataSource, error) {
 	if opts.DeltaSource != "" {
 		return &simpleDataSource{tarpatch.NewFilesystemDataSource(opts.DeltaSource)}, nil
 	}
 	if opts.ContainerStore != nil {
-		return resolveContainerStorageDataSource(opts.ContainerStore, sourceConfigDigest, opts.Debug)
+		return resolveContainerStorageDataSource(opts.ContainerStore, sourceConfigDigest, log)
 	}
-	ds, err := resolveOstreeDataSource(opts.RepoPath, sourceConfigDigest, opts.Debug)
+	ds, err := resolveOstreeDataSource(opts.RepoPath, sourceConfigDigest, log)
 	if err != nil {
 		return nil, err
 	}
 	return &simpleDataSource{ds}, nil
 }
 
-func ApplyDelta(opts ApplyOptions) error {
-	opts.Debug("Applying delta: %s", opts.DeltaPath)
-	opts.Debug("Output: %s", opts.OutputPath)
+func ApplyDelta(opts ApplyOptions, log Logger) error {
+	log.Debug("Applying delta: %s", opts.DeltaPath)
+	log.Debug("Output: %s", opts.OutputPath)
 	if opts.DeltaSource != "" {
-		opts.Debug("Delta source: %s", opts.DeltaSource)
+		log.Debug("Delta source: %s", opts.DeltaSource)
 	} else if opts.ContainerStore != nil {
-		opts.Debug("Container storage")
+		log.Debug("Container storage")
 	} else {
-		opts.Debug("Ostree repo: %s", opts.RepoPath)
+		log.Debug("Ostree repo: %s", opts.RepoPath)
 	}
 
-	opts.Debug("\nParsing delta...")
-	delta, err := parseDeltaArtifact(opts.DeltaPath, opts.Debug, opts.Warning)
+	log.Debug("\nParsing delta...")
+	delta, err := parseDeltaArtifact(opts.DeltaPath, log)
 	if err != nil {
 		return err
 	}
 	defer delta.Close()
 
-	dataSource, err := getDataSource(&opts, delta.sourceConfigDigest)
+	dataSource, err := getDataSource(&opts, delta.sourceConfigDigest, log)
 	if err != nil {
 		return fmt.Errorf("failed to create data source: %w", err)
 	}
@@ -81,7 +79,7 @@ func ApplyDelta(opts ApplyOptions) error {
 	tarWriter := tar.NewWriter(outFile)
 	defer tarWriter.Close()
 
-	opts.Debug("\nWriting oci-layout")
+	log.Debug("\nWriting oci-layout")
 	if err := writeTarFile(tarWriter, "oci-layout", ociLayoutFileData); err != nil {
 		return err
 	}
@@ -96,12 +94,12 @@ func ApplyDelta(opts ApplyOptions) error {
 	outputLayers := make([]v1.Descriptor, len(delta.imageManifest.Layers))
 	copy(outputLayers, delta.imageManifest.Layers)
 
-	opts.Debug("\nProcessing layers...")
+	log.Debug("\nProcessing layers...")
 	for i, layer := range delta.imageManifest.Layers {
 		deltaLayer, inDelta := delta.deltaLayerByTo[layer.Digest]
 		if !inDelta {
 			// Reused layer: keep original descriptor, no blob written.
-			opts.Debug("  Layer %s: skipped (not in delta)", layer.Digest.Encoded()[:16])
+			log.Debug("  Layer %s: skipped (not in delta)", layer.Digest.Encoded()[:16])
 			continue
 		}
 
@@ -111,19 +109,19 @@ func ApplyDelta(opts ApplyOptions) error {
 		}
 
 		if deltaLayer.MediaType == mediaTypeTarDiff {
-			opts.Debug("  Layer %s: reconstructing from tar-diff", layer.Digest.Encoded()[:16])
+			log.Debug("  Layer %s: reconstructing from tar-diff", layer.Digest.Encoded()[:16])
 			r, err := delta.GetBlobReader(deltaLayer.Digest)
 			if err != nil {
 				return fmt.Errorf("failed to read tar-diff for layer %s: %w", layer.Digest.Encoded()[:16], err)
 			}
-			newDigest, newSize, err := processLayerDiff(&opts, tarWriter, r, expectedDiffID, dataSource)
+			newDigest, newSize, err := processLayerDiff(opts.TmpDir, log, tarWriter, r, expectedDiffID, dataSource)
 			if err != nil {
 				return err
 			}
 			outputLayers[i].Digest = newDigest
 			outputLayers[i].Size = newSize
 		} else {
-			opts.Debug("  Layer %s: copying original (%d bytes)", layer.Digest.Encoded()[:16], deltaLayer.Size)
+			log.Debug("  Layer %s: copying original (%d bytes)", layer.Digest.Encoded()[:16], deltaLayer.Size)
 			if err := delta.WriteBlobToTar(tarWriter, layer.Digest); err != nil {
 				return fmt.Errorf("failed to copy layer %s: %w", layer.Digest.Encoded()[:16], err)
 			}
@@ -131,7 +129,7 @@ func ApplyDelta(opts ApplyOptions) error {
 	}
 
 	// Build and write the output image manifest.
-	opts.Debug("\nWriting output image manifest...")
+	log.Debug("\nWriting output image manifest...")
 	outputManifest := delta.imageManifest
 	outputManifest.Layers = outputLayers
 	outputManifestData, err := json.Marshal(outputManifest)
@@ -157,17 +155,17 @@ func ApplyDelta(opts ApplyOptions) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal index: %w", err)
 	}
-	opts.Debug("\nWriting index.json")
+	log.Debug("\nWriting index.json")
 	if err := writeTarFile(tarWriter, "index.json", indexData); err != nil {
 		return err
 	}
 
-	opts.Debug("\nDelta applied successfully!")
+	log.Debug("\nDelta applied successfully!")
 	return nil
 }
 
-func processLayerDiff(opts *ApplyOptions, tarWriter *tar.Writer, tarDiffReader io.Reader, expectedDiffID digest.Digest, dataSource tarpatch.DataSource) (newDigest digest.Digest, newSize int64, err error) {
-	tmpFile, err := os.CreateTemp(opts.TmpDir, "bootc-delta-layer-*.gz")
+func processLayerDiff(tmpDir string, log Logger, tarWriter *tar.Writer, tarDiffReader io.Reader, expectedDiffID digest.Digest, dataSource tarpatch.DataSource) (newDigest digest.Digest, newSize int64, err error) {
+	tmpFile, err := os.CreateTemp(tmpDir, "bootc-delta-layer-*.gz")
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to create temp file: %w", err)
 	}
@@ -199,15 +197,15 @@ func processLayerDiff(opts *ApplyOptions, tarWriter *tar.Writer, tarDiffReader i
 
 	// Get the diff_id from the uncompressed hash
 	actualDiffID := digest.NewDigestFromBytes(digest.SHA256, diffIDHash.Sum(nil))
-	opts.Debug("    Computed diff_id: %s", actualDiffID.Encoded()[:16])
+	log.Debug("    Computed diff_id: %s", actualDiffID.Encoded()[:16])
 
 	if expectedDiffID != "" {
-		opts.Debug("    Expected diff_id: %s", expectedDiffID.Encoded()[:16])
+		log.Debug("    Expected diff_id: %s", expectedDiffID.Encoded()[:16])
 		if actualDiffID != expectedDiffID {
 			return "", 0, fmt.Errorf("diff_id mismatch: expected %s, got %s",
 				expectedDiffID.Encoded()[:16], actualDiffID.Encoded()[:16])
 		}
-		opts.Debug("    Validated diff_id: %s", actualDiffID.Encoded()[:16])
+		log.Debug("    Validated diff_id: %s", actualDiffID.Encoded()[:16])
 	}
 
 	// Get the compressed digest and size
@@ -217,7 +215,7 @@ func processLayerDiff(opts *ApplyOptions, tarWriter *tar.Writer, tarDiffReader i
 		return "", 0, err
 	}
 	newSize = info.Size()
-	opts.Debug("    Compressed to %d bytes, new digest: %s", newSize, newDigest.Encoded()[:16])
+	log.Debug("    Compressed to %d bytes, new digest: %s", newSize, newDigest.Encoded()[:16])
 
 	// Stream the compressed file into the tar archive
 	if _, err := tmpFile.Seek(0, 0); err != nil {

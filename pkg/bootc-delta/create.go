@@ -22,8 +22,6 @@ type CreateOptions struct {
 	TmpDir      string
 	Verbose     bool
 	Parallelism int // max concurrent tar-diff workers; 0 means GOMAXPROCS
-	Debug       func(format string, args ...interface{})
-	Warning     func(format string, args ...interface{})
 }
 
 type CreateStats struct {
@@ -36,38 +34,38 @@ type CreateStats struct {
 	OriginalLayerBytes  int64
 }
 
-func CreateDelta(opts CreateOptions) (*CreateStats, error) {
+func CreateDelta(opts CreateOptions, log Logger) (*CreateStats, error) {
 	stats := &CreateStats{}
 
-	opts.Debug("Indexing old image: %s", opts.OldImage)
+	log.Debug("Indexing old image: %s", opts.OldImage)
 	oldTarIndex, err := indexTarArchive(opts.OldImage)
 	if err != nil {
 		return nil, fmt.Errorf("failed to index old image: %w", err)
 	}
 	defer oldTarIndex.Close()
 
-	opts.Debug("Indexing new image: %s", opts.NewImage)
+	log.Debug("Indexing new image: %s", opts.NewImage)
 	newTarIndex, err := indexTarArchive(opts.NewImage)
 	if err != nil {
 		return nil, fmt.Errorf("failed to index new image: %w", err)
 	}
 	defer newTarIndex.Close()
 
-	opts.Debug("Parsing old image")
+	log.Debug("Parsing old image")
 	old, err := parseOCIImage(oldTarIndex)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse old image: %w", err)
 	}
 	stats.OldLayers = len(old.layers)
-	opts.Debug("  Found %d layers in old image", stats.OldLayers)
+	log.Debug("  Found %d layers in old image", stats.OldLayers)
 
-	opts.Debug("Parsing new image")
+	log.Debug("Parsing new image")
 	new, err := parseOCIImage(newTarIndex)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse new image: %w", err)
 	}
 	stats.NewLayers = len(new.layers)
-	opts.Debug("  Found %d layers in new image", stats.NewLayers)
+	log.Debug("  Found %d layers in new image", stats.NewLayers)
 
 	// Find layers with new content (diff_id not in old image)
 	newOnlyLayers := make(map[digest.Digest]bool)
@@ -77,21 +75,21 @@ func CreateDelta(opts CreateOptions) (*CreateStats, error) {
 			oldReusedLayers[oldLayer.Digest] = true
 		} else {
 			newOnlyLayers[newLayer.Digest] = true
-			opts.Debug("  New layer: %s (diff_id: %s)", newLayer.Digest.Encoded()[:16], newLayer.DiffID.Encoded()[:16])
+			log.Debug("  New layer: %s (diff_id: %s)", newLayer.Digest.Encoded()[:16], newLayer.DiffID.Encoded()[:16])
 		}
 	}
 	stats.ProcessedLayers = len(newOnlyLayers)
 	stats.SkippedLayers = len(new.layers) - len(newOnlyLayers)
-	opts.Debug("Layers with new content (will process): %d", stats.ProcessedLayers)
-	opts.Debug("Layers with existing content (will skip): %d", stats.SkippedLayers)
+	log.Debug("Layers with new content (will process): %d", stats.ProcessedLayers)
+	log.Debug("Layers with existing content (will skip): %d", stats.SkippedLayers)
 
-	opts.Debug("\nProcessing layers...")
+	log.Debug("\nProcessing layers...")
 	for _, l := range new.layers {
 		if !newOnlyLayers[l.Digest] {
-			opts.Debug("  Skipping layer with existing content %s", l.Digest.Encoded()[:16])
+			log.Debug("  Skipping layer with existing content %s", l.Digest.Encoded()[:16])
 		}
 	}
-	layerResults, err := computeLayerDiffsParallel(&opts, old, new, newOnlyLayers, opts.TmpDir)
+	layerResults, err := computeLayerDiffsParallel(log, old, new, newOnlyLayers, opts.TmpDir, opts.Parallelism)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +143,7 @@ func CreateDelta(opts CreateOptions) (*CreateStats, error) {
 		}
 		var desc v1.Descriptor
 		if r.diffPath != "" {
-			opts.Debug("  Layer %s: using tar-diff (%d bytes, saved %d)", r.digest.Encoded()[:16], r.diffSize, r.originalSize-r.diffSize)
+			log.Debug("  Layer %s: using tar-diff (%d bytes, saved %d)", r.digest.Encoded()[:16], r.diffSize, r.originalSize-r.diffSize)
 			desc = v1.Descriptor{
 				MediaType:   mediaTypeTarDiff,
 				Digest:      r.diffDigest,
@@ -154,7 +152,7 @@ func CreateDelta(opts CreateOptions) (*CreateStats, error) {
 			}
 			stats.TarDiffLayerBytes += r.diffSize
 		} else {
-			opts.Debug("  Layer %s: using original (%d bytes)", r.digest.Encoded()[:16], r.originalSize)
+			log.Debug("  Layer %s: using original (%d bytes)", r.digest.Encoded()[:16], r.originalSize)
 			desc = v1.Descriptor{
 				MediaType:   v1.MediaTypeImageLayerGzip,
 				Digest:      r.digest,
@@ -221,12 +219,12 @@ func CreateDelta(opts CreateOptions) (*CreateStats, error) {
 	tarWriter := tar.NewWriter(outFile)
 	defer tarWriter.Close()
 
-	opts.Debug("\nWriting oci-layout")
+	log.Debug("\nWriting oci-layout")
 	if err := writeTarFile(tarWriter, "oci-layout", ociLayoutFileData); err != nil {
 		return nil, err
 	}
 
-	opts.Debug("Writing image manifest and config blobs")
+	log.Debug("Writing image manifest and config blobs")
 	if err := writeTarFile(tarWriter, blobTarName(imageManifestDesc.Digest), imageManifestData); err != nil {
 		return nil, err
 	}
@@ -234,7 +232,7 @@ func CreateDelta(opts CreateOptions) (*CreateStats, error) {
 		return nil, err
 	}
 
-	opts.Debug("Writing layer blobs")
+	log.Debug("Writing layer blobs")
 	for _, l := range new.layers {
 		if !newOnlyLayers[l.Digest] {
 			continue
@@ -251,7 +249,7 @@ func CreateDelta(opts CreateOptions) (*CreateStats, error) {
 		}
 	}
 
-	opts.Debug("Writing delta manifest and index.json")
+	log.Debug("Writing delta manifest and index.json")
 	if err := writeTarFile(tarWriter, blobTarName(deltaConfigDigest), deltaConfigData); err != nil {
 		return nil, err
 	}
@@ -273,18 +271,18 @@ type layerDiffResult struct {
 	diffDigest   digest.Digest // sha256 of the diff file blob
 }
 
-func computeLayerDiffsParallel(opts *CreateOptions, old *OCIImage, new *OCIImage, newOnlyLayers map[digest.Digest]bool, tmpDir string) ([]layerDiffResult, error) {
+func computeLayerDiffsParallel(log Logger, old *OCIImage, new *OCIImage, newOnlyLayers map[digest.Digest]bool, tmpDir string, parallelism int) ([]layerDiffResult, error) {
 	layers := make([]digest.Digest, 0, len(newOnlyLayers))
 	for d := range newOnlyLayers {
 		layers = append(layers, d)
 	}
 
 	// Pre-analyze old layers once (shared across all diffs)
-	opts.Debug("  Analyzing source layers...")
+	log.Debug("  Analyzing source layers...")
 	diffOpts := tardiff.NewOptions()
 	diffOpts.SetIgnoreSourcePrefixes([]string{"sysroot/ostree/"})
 	diffOpts.SetApplyWhiteouts(true)
-	diffOpts.SetTmpDir(opts.TmpDir)
+	diffOpts.SetTmpDir(tmpDir)
 
 	var oldFiles []io.ReadSeeker
 	for _, layer := range old.layers {
@@ -303,7 +301,6 @@ func computeLayerDiffsParallel(opts *CreateOptions, old *OCIImage, new *OCIImage
 	results := make([]layerDiffResult, len(layers))
 	errs := make([]error, len(layers))
 
-	parallelism := opts.Parallelism
 	if parallelism <= 0 {
 		parallelism = runtime.GOMAXPROCS(0)
 	}
@@ -318,7 +315,7 @@ func computeLayerDiffsParallel(opts *CreateOptions, old *OCIImage, new *OCIImage
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			results[i], errs[i] = computeLayerDiff(opts, old, new, d, i+1, total, tmpDir, sources, diffOpts)
+			results[i], errs[i] = computeLayerDiff(log, old, new, d, i+1, total, tmpDir, sources, diffOpts)
 		}()
 	}
 
@@ -338,13 +335,13 @@ func computeLayerDiffsParallel(opts *CreateOptions, old *OCIImage, new *OCIImage
 	return results, nil
 }
 
-func computeLayerDiff(opts *CreateOptions, old *OCIImage, new *OCIImage, blobDigest digest.Digest, layerNum, total int, tmpDir string, sources *tardiff.SourceAnalysis, diffOpts *tardiff.Options) (layerDiffResult, error) {
+func computeLayerDiff(log Logger, old *OCIImage, new *OCIImage, blobDigest digest.Digest, layerNum, total int, tmpDir string, sources *tardiff.SourceAnalysis, diffOpts *tardiff.Options) (layerDiffResult, error) {
 	originalSize, err := new.tarIndex.GetSize(blobTarName(blobDigest))
 	if err != nil {
 		return layerDiffResult{}, fmt.Errorf("failed to get layer size %s: %w", blobDigest.Encoded()[:16], err)
 	}
 
-	opts.Debug("  Computing diff for layer %d/%d %s (%d bytes)", layerNum, total, blobDigest.Encoded()[:16], originalSize)
+	log.Debug("  Computing diff for layer %d/%d %s (%d bytes)", layerNum, total, blobDigest.Encoded()[:16], originalSize)
 
 	tmpFile, err := os.CreateTemp(tmpDir, "bootc-delta-*.tar-diff")
 	if err != nil {
@@ -354,7 +351,7 @@ func computeLayerDiff(opts *CreateOptions, old *OCIImage, new *OCIImage, blobDig
 	tmpFile.Close()
 
 	if err := runTarDiff(old, new, blobDigest, diffPath, sources, diffOpts); err != nil {
-		opts.Warning("tar-diff failed for layer %s: %v, using original", blobDigest.Encoded()[:16], err)
+		log.Warning("tar-diff failed for layer %s: %v, using original", blobDigest.Encoded()[:16], err)
 		os.Remove(diffPath)
 		return layerDiffResult{digest: blobDigest, originalSize: originalSize}, nil
 	}

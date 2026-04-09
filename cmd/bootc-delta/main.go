@@ -10,6 +10,20 @@ import (
 	"github.com/containers/storage/pkg/reexec"
 )
 
+type cmdLogger struct {
+	debug bool
+}
+
+func (l *cmdLogger) Debug(format string, args ...interface{}) {
+	if l.debug {
+		fmt.Printf(format+"\n", args...)
+	}
+}
+
+func (l *cmdLogger) Warning(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, "Warning: "+format+"\n", args...)
+}
+
 func main() {
 	if reexec.Init() {
 		return
@@ -94,6 +108,7 @@ func createCommand(args []string) error {
 	}
 	defer os.RemoveAll(tmpDir)
 
+	log := &cmdLogger{debug: *debug}
 	opts := bootcdelta.CreateOptions{
 		OldImage:    fs.Arg(0),
 		NewImage:    fs.Arg(1),
@@ -101,17 +116,9 @@ func createCommand(args []string) error {
 		TmpDir:      tmpDir,
 		Verbose:     *verbose,
 		Parallelism: *parallelism,
-		Debug: func(format string, args ...interface{}) {
-			if *debug {
-				fmt.Printf(format+"\n", args...)
-			}
-		},
-		Warning: func(format string, args ...interface{}) {
-			fmt.Fprintf(os.Stderr, "Warning: "+format+"\n", args...)
-		},
 	}
 
-	stats, err := bootcdelta.CreateDelta(opts)
+	stats, err := bootcdelta.CreateDelta(opts, log)
 	if err != nil {
 		return err
 	}
@@ -200,6 +207,7 @@ func applyCommand(args []string) error {
 	}
 	defer os.RemoveAll(tmpDir)
 
+	log := &cmdLogger{debug: *debug}
 	opts := bootcdelta.ApplyOptions{
 		DeltaPath:      fs.Arg(0),
 		OutputPath:     fs.Arg(1),
@@ -207,17 +215,9 @@ func applyCommand(args []string) error {
 		DeltaSource:    *deltaSource,
 		ContainerStore: store,
 		TmpDir:         tmpDir,
-		Debug: func(format string, args ...interface{}) {
-			if *debug {
-				fmt.Printf(format+"\n", args...)
-			}
-		},
-		Warning: func(format string, args ...interface{}) {
-			fmt.Fprintf(os.Stderr, "Warning: "+format+"\n", args...)
-		},
 	}
 
-	return bootcdelta.ApplyDelta(opts)
+	return bootcdelta.ApplyDelta(opts, log)
 }
 
 func importCommand(args []string) error {
@@ -259,22 +259,15 @@ func importCommand(args []string) error {
 	}
 	defer os.RemoveAll(tmpDir)
 
+	log := &cmdLogger{debug: *debug}
 	opts := bootcdelta.ImportOptions{
 		DeltaPath: fs.Arg(0),
 		Store:     store,
 		Tag:       *tag,
 		TmpDir:    tmpDir,
-		Debug: func(format string, args ...interface{}) {
-			if *debug {
-				fmt.Printf(format+"\n", args...)
-			}
-		},
-		Warning: func(format string, args ...interface{}) {
-			fmt.Fprintf(os.Stderr, "Warning: "+format+"\n", args...)
-		},
 	}
 
-	imageID, err := bootcdelta.ImportDelta(opts)
+	imageID, err := bootcdelta.ImportDelta(opts, log)
 	if err != nil {
 		return err
 	}

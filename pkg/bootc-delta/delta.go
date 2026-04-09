@@ -32,7 +32,7 @@ type deltaArtifact struct {
 	deltaLayerByTo      map[digest.Digest]v1.Descriptor
 }
 
-func parseDeltaArtifact(path string, debug func(format string, args ...interface{}), warning func(format string, args ...interface{})) (*deltaArtifact, error) {
+func parseDeltaArtifact(path string, log Logger) (*deltaArtifact, error) {
 	tarIndex, err := indexTarArchive(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to index delta file: %w", err)
@@ -54,7 +54,7 @@ func parseDeltaArtifact(path string, debug func(format string, args ...interface
 	}
 
 	deltaManifestDigest := ociIndex.Manifests[0].Digest
-	debug("  Delta manifest: %s", deltaManifestDigest.Encoded()[:16])
+	log.Debug("  Delta manifest: %s", deltaManifestDigest.Encoded()[:16])
 
 	deltaManifestData, err := tarIndex.ReadFile(blobTarName(deltaManifestDigest))
 	if err != nil {
@@ -89,7 +89,7 @@ func parseDeltaArtifact(path string, debug func(format string, args ...interface
 			}
 			toDigest, err := digest.Parse(toStr)
 			if err != nil {
-				warning("invalid delta.to annotation %q: %v", toStr, err)
+				log.Warning("invalid delta.to annotation %q: %v", toStr, err)
 				continue
 			}
 			deltaLayerByTo[toDigest] = *layer
@@ -114,7 +114,7 @@ func parseDeltaArtifact(path string, debug func(format string, args ...interface
 		tarIndex.Close()
 		return nil, fmt.Errorf("failed to parse embedded image manifest: %w", err)
 	}
-	debug("  Image manifest: %s (%d layers)", imageManifestDesc.Digest.Encoded()[:16], len(imageManifest.Layers))
+	log.Debug("  Image manifest: %s (%d layers)", imageManifestDesc.Digest.Encoded()[:16], len(imageManifest.Layers))
 
 	imageConfigData, err := tarIndex.ReadFile(blobTarName(imageConfigDesc.Digest))
 	if err != nil {
@@ -126,7 +126,7 @@ func parseDeltaArtifact(path string, debug func(format string, args ...interface
 		tarIndex.Close()
 		return nil, fmt.Errorf("failed to parse embedded image config: %w", err)
 	}
-	debug("  Image config: %s (%d diff_ids)", imageConfigDesc.Digest.Encoded()[:16], len(imageConfig.RootFS.DiffIDs))
+	log.Debug("  Image config: %s (%d diff_ids)", imageConfigDesc.Digest.Encoded()[:16], len(imageConfig.RootFS.DiffIDs))
 
 	return &deltaArtifact{
 		tarIndex:            tarIndex,
