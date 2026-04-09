@@ -21,7 +21,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  bootc-delta <subcommand> [OPTIONS] [ARGUMENTS]\n\n")
 		fmt.Fprintf(os.Stderr, "Subcommands:\n")
 		fmt.Fprintf(os.Stderr, "  create    Create a delta between two OCI images\n")
-		fmt.Fprintf(os.Stderr, "  apply     Apply a delta to create a standard OCI archive\n\n")
+		fmt.Fprintf(os.Stderr, "  apply     Apply a delta to create a standard OCI archive\n")
+		fmt.Fprintf(os.Stderr, "  import    Apply a delta and import the result into container storage\n\n")
 		fmt.Fprintf(os.Stderr, "Run 'bootc-delta <subcommand> -h' for subcommand-specific options.\n")
 	}
 
@@ -42,6 +43,11 @@ func main() {
 		}
 	case "apply":
 		if err := applyCommand(flag.Args()[1:]); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	case "import":
+		if err := importCommand(flag.Args()[1:]); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -212,4 +218,67 @@ func applyCommand(args []string) error {
 	}
 
 	return bootcdelta.ApplyDelta(opts)
+}
+
+func importCommand(args []string) error {
+	fs := flag.NewFlagSet("bootc-delta import", flag.ContinueOnError)
+	containerStorage := fs.String("container-storage", "", "podman container storage root (default: system default)")
+	tag := fs.String("t", "", "tag name for the imported image")
+	debug := fs.Bool("debug", false, "show detailed progress information")
+
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: bootc-delta import [OPTIONS] <delta-file>")
+		fmt.Fprintln(os.Stderr, "\nApply a delta and import the result into container storage.")
+		fmt.Fprintln(os.Stderr, "\nArguments:")
+		fmt.Fprintln(os.Stderr, "  <delta-file>  Path to the delta file")
+		fmt.Fprintln(os.Stderr, "\nOptions:")
+		fs.PrintDefaults()
+	}
+
+	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			os.Exit(0)
+		}
+		return err
+	}
+
+	if fs.NArg() != 1 {
+		fs.Usage()
+		return fmt.Errorf("expected 1 argument, got %d", fs.NArg())
+	}
+
+	store, err := bootcdelta.OpenContainerStorage(*containerStorage)
+	if err != nil {
+		return err
+	}
+	defer func() { store.Shutdown(false) }()
+
+	tmpDir, err := os.MkdirTemp("/var/tmp", "bootc-delta-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	opts := bootcdelta.ImportOptions{
+		DeltaPath: fs.Arg(0),
+		Store:     store,
+		Tag:       *tag,
+		TmpDir:    tmpDir,
+		Debug: func(format string, args ...interface{}) {
+			if *debug {
+				fmt.Printf(format+"\n", args...)
+			}
+		},
+		Warning: func(format string, args ...interface{}) {
+			fmt.Fprintf(os.Stderr, "Warning: "+format+"\n", args...)
+		},
+	}
+
+	imageID, err := bootcdelta.ImportDelta(opts)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(imageID)
+	return nil
 }

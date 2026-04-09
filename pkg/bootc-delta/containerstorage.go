@@ -36,15 +36,14 @@ func OpenContainerStorage(graphRoot string) (storage.Store, error) {
 	return store, nil
 }
 
-func resolveContainerStorageDataSource(store storage.Store, sourceConfigDigest string, debug func(format string, args ...interface{})) (*containerStorageDataSource, error) {
+func findImageByConfigDigest(store storage.Store, configDigest string, debug func(format string, args ...interface{})) (string, error) {
 	images, err := store.Images()
 	if err != nil {
-		return nil, fmt.Errorf("failed to list images: %w", err)
+		return "", fmt.Errorf("failed to list images: %w", err)
 	}
 
 	debug("Found %d images in container storage", len(images))
 
-	var matchedID string
 	for _, img := range images {
 		manifestData, err := store.ImageBigData(img.ID, "manifest")
 		if err != nil {
@@ -62,20 +61,24 @@ func resolveContainerStorageDataSource(store storage.Store, sourceConfigDigest s
 
 		debug("  Image %s: config digest %s", img.ID[:16], manifest.Config.Digest)
 
-		if manifest.Config.Digest == sourceConfigDigest {
+		if manifest.Config.Digest == configDigest {
 			debug("Matched image: %s", img.ID[:16])
-			matchedID = img.ID
-			break
+			return img.ID, nil
 		}
 	}
 
-	if matchedID == "" {
-		return nil, fmt.Errorf("no image found with config digest %s", sourceConfigDigest)
+	return "", fmt.Errorf("no image found with config digest %s", configDigest)
+}
+
+func resolveContainerStorageDataSource(store storage.Store, sourceConfigDigest string, debug func(format string, args ...interface{})) (*containerStorageDataSource, error) {
+	imageID, err := findImageByConfigDigest(store, sourceConfigDigest, debug)
+	if err != nil {
+		return nil, err
 	}
 
-	mountPoint, err := store.MountImage(matchedID, nil, "")
+	mountPoint, err := store.MountImage(imageID, nil, "")
 	if err != nil {
-		return nil, fmt.Errorf("failed to mount image %s: %w", matchedID[:16], err)
+		return nil, fmt.Errorf("failed to mount image %s: %w", imageID[:16], err)
 	}
 
 	debug("Mounted image at %s", mountPoint)
@@ -83,6 +86,6 @@ func resolveContainerStorageDataSource(store storage.Store, sourceConfigDigest s
 	return &containerStorageDataSource{
 		DataSource: tarpatch.NewFilesystemDataSource(mountPoint),
 		store:      store,
-		imageID:    matchedID,
+		imageID:    imageID,
 	}, nil
 }
