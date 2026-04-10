@@ -152,10 +152,11 @@ func applyCommand(args []string) error {
 
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "Usage: oci-delta apply [OPTIONS] <delta-file> <output>")
-		fmt.Fprintln(os.Stderr, "\nApply a delta to reconstruct a full OCI archive.")
+		fmt.Fprintln(os.Stderr, "\nApply a delta to reconstruct a full OCI image.")
 		fmt.Fprintln(os.Stderr, "\nArguments:")
 		fmt.Fprintln(os.Stderr, "  <delta-file>  Path to the delta file")
-		fmt.Fprintln(os.Stderr, "  <output>      Path for the reconstructed OCI archive")
+		fmt.Fprintln(os.Stderr, "  <output>      Output image (oci-archive:path or oci:path)")
+		fmt.Fprintln(os.Stderr, "\nIf no type prefix is given, oci-archive: is assumed.")
 		fmt.Fprintln(os.Stderr, "\nOptions:")
 		fs.PrintDefaults()
 	}

@@ -1,7 +1,6 @@
 package ocidelta
 
 import (
-	"archive/tar"
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/json"
@@ -70,28 +69,19 @@ func ApplyDelta(opts ApplyOptions, log Logger) error {
 	// Reconstruct diff_id lookup from image config.
 	layerDiffIDs := delta.imageConfig.RootFS.DiffIDs
 
-	outFile, err := os.Create(opts.OutputPath)
+	writer, err := OpenOCIWriter(opts.OutputPath)
 	if err != nil {
-		return fmt.Errorf("failed to create output file: %w", err)
+		return fmt.Errorf("failed to create output: %w", err)
 	}
-	defer outFile.Close()
-
-	tarWriter := tar.NewWriter(outFile)
-	defer tarWriter.Close()
+	defer writer.Close()
 
 	log.Debug("\nWriting oci-layout")
-	if err := writeTarFile(tarWriter, "oci-layout", ociLayoutFileData); err != nil {
-		return err
-	}
-	if err := writeTarDir(tarWriter, "blobs/"); err != nil {
-		return err
-	}
-	if err := writeTarDir(tarWriter, "blobs/sha256/"); err != nil {
+	if err := writer.WriteFile("oci-layout", ociLayoutFileData); err != nil {
 		return err
 	}
 
 	// Write image config blob (unchanged).
-	if err := delta.WriteBlobToTar(tarWriter, delta.imageConfigDigest); err != nil {
+	if err := writeBlob(writer, delta.tarIndex, delta.imageConfigDigest); err != nil {
 		return fmt.Errorf("failed to write image config: %w", err)
 	}
 
@@ -120,7 +110,7 @@ func ApplyDelta(opts ApplyOptions, log Logger) error {
 			if err != nil {
 				return fmt.Errorf("failed to read tar-diff for layer %s: %w", layer.Digest.Encoded()[:16], err)
 			}
-			newDigest, newSize, err := processLayerDiff(opts.TmpDir, log, tarWriter, r, expectedDiffID, dataSource)
+			newDigest, newSize, err := processLayerDiff(opts.TmpDir, log, writer, r, expectedDiffID, dataSource)
 			if err != nil {
 				return err
 			}
@@ -128,7 +118,7 @@ func ApplyDelta(opts ApplyOptions, log Logger) error {
 			outputLayers[i].Size = newSize
 		} else {
 			log.Debug("  Layer %s: copying original (%d bytes)", layer.Digest.Encoded()[:16], deltaLayer.Size)
-			if err := delta.WriteBlobToTar(tarWriter, layer.Digest); err != nil {
+			if err := writeBlob(writer, delta.tarIndex, layer.Digest); err != nil {
 				return fmt.Errorf("failed to copy layer %s: %w", layer.Digest.Encoded()[:16], err)
 			}
 		}
@@ -143,7 +133,7 @@ func ApplyDelta(opts ApplyOptions, log Logger) error {
 		return fmt.Errorf("failed to marshal output manifest: %w", err)
 	}
 	outputManifestDigest := computeDigest(outputManifestData)
-	if err := writeTarFile(tarWriter, blobTarName(outputManifestDigest), outputManifestData); err != nil {
+	if err := writer.WriteFile(blobTarName(outputManifestDigest), outputManifestData); err != nil {
 		return err
 	}
 
@@ -162,7 +152,7 @@ func ApplyDelta(opts ApplyOptions, log Logger) error {
 		return fmt.Errorf("failed to marshal index: %w", err)
 	}
 	log.Debug("\nWriting index.json")
-	if err := writeTarFile(tarWriter, "index.json", indexData); err != nil {
+	if err := writer.WriteFile("index.json", indexData); err != nil {
 		return err
 	}
 
@@ -170,7 +160,30 @@ func ApplyDelta(opts ApplyOptions, log Logger) error {
 	return nil
 }
 
-func processLayerDiff(tmpDir string, log Logger, tarWriter *tar.Writer, tarDiffReader io.Reader, expectedDiffID digest.Digest, dataSource tarpatch.DataSource) (newDigest digest.Digest, newSize int64, err error) {
+func writeBlob(w OCIWriter, store BlobStore, d digest.Digest) error {
+	name := blobTarName(d)
+	r, size, err := store.ReadFile(name)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	return w.WriteFileFromReader(name, size, r)
+}
+
+func writeFileFromPath(w OCIWriter, name string, filePath string) error {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	return w.WriteFileFromReader(name, info.Size(), f)
+}
+
+func processLayerDiff(tmpDir string, log Logger, writer OCIWriter, tarDiffReader io.Reader, expectedDiffID digest.Digest, dataSource tarpatch.DataSource) (newDigest digest.Digest, newSize int64, err error) {
 	tmpFile, err := os.CreateTemp(tmpDir, "oci-delta-layer-*.gz")
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to create temp file: %w", err)
@@ -223,11 +236,10 @@ func processLayerDiff(tmpDir string, log Logger, tarWriter *tar.Writer, tarDiffR
 	newSize = info.Size()
 	log.Debug("    Compressed to %d bytes, new digest: %s", newSize, newDigest.Encoded()[:16])
 
-	// Stream the compressed file into the tar archive
 	if _, err := tmpFile.Seek(0, 0); err != nil {
 		return "", 0, err
 	}
-	if err := writeTarFileFromReader(tarWriter, blobTarName(newDigest), newSize, tmpFile); err != nil {
+	if err := writer.WriteFileFromReader(blobTarName(newDigest), newSize, tmpFile); err != nil {
 		return "", 0, fmt.Errorf("failed to write reconstructed layer: %w", err)
 	}
 

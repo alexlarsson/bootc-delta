@@ -1,7 +1,6 @@
 package ocidelta
 
 import (
-	"archive/tar"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -161,6 +160,3 @@ func (d *deltaArtifact) GetBlobSize(dgst digest.Digest) (int64, error) {
 	return size, nil
 }
 
-func (d *deltaArtifact) WriteBlobToTar(w *tar.Writer, dgst digest.Digest) error {
-	return writeBlobTarFile(w, d.tarIndex, dgst)
-}

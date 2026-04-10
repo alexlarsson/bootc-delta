@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	digest "github.com/opencontainers/go-digest"
@@ -54,6 +55,110 @@ func (d *DirBlobStore) ReadFile(name string) (io.ReadSeekCloser, int64, error) {
 
 func (d *DirBlobStore) Close() error {
 	return nil
+}
+
+type OCIWriter interface {
+	WriteFile(name string, data []byte) error
+	WriteFileFromReader(name string, size int64, r io.Reader) error
+	Close() error
+}
+
+type tarOCIWriter struct {
+	file *os.File
+	tw   *tar.Writer
+	dirs map[string]bool
+}
+
+func newTarOCIWriter(path string) (*tarOCIWriter, error) {
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, err
+	}
+	tw := tar.NewWriter(f)
+	return &tarOCIWriter{file: f, tw: tw, dirs: make(map[string]bool)}, nil
+}
+
+func (w *tarOCIWriter) ensureParentDirs(name string) error {
+	parts := strings.Split(name, "/")
+	for i := 1; i < len(parts); i++ {
+		dir := strings.Join(parts[:i], "/") + "/"
+		if !w.dirs[dir] {
+			if err := writeTarDir(w.tw, dir); err != nil {
+				return err
+			}
+			w.dirs[dir] = true
+		}
+	}
+	return nil
+}
+
+func (w *tarOCIWriter) WriteFile(name string, data []byte) error {
+	if err := w.ensureParentDirs(name); err != nil {
+		return err
+	}
+	return writeTarFile(w.tw, name, data)
+}
+
+func (w *tarOCIWriter) WriteFileFromReader(name string, size int64, r io.Reader) error {
+	if err := w.ensureParentDirs(name); err != nil {
+		return err
+	}
+	return writeTarFileFromReader(w.tw, name, size, r)
+}
+
+func (w *tarOCIWriter) Close() error {
+	err := w.tw.Close()
+	if err2 := w.file.Close(); err == nil {
+		err = err2
+	}
+	return err
+}
+
+type dirOCIWriter struct {
+	dir string
+}
+
+func newDirOCIWriter(dir string) (*dirOCIWriter, error) {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, err
+	}
+	return &dirOCIWriter{dir: dir}, nil
+}
+
+func (w *dirOCIWriter) WriteFile(name string, data []byte) error {
+	path := filepath.Join(w.dir, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+func (w *dirOCIWriter) WriteFileFromReader(name string, size int64, r io.Reader) error {
+	path := filepath.Join(w.dir, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = io.Copy(f, r)
+	return err
+}
+
+func (w *dirOCIWriter) Close() error {
+	return nil
+}
+
+func OpenOCIWriter(ref string) (OCIWriter, error) {
+	if strings.HasPrefix(ref, "oci-archive:") {
+		return newTarOCIWriter(ref[len("oci-archive:"):])
+	}
+	if strings.HasPrefix(ref, "oci:") {
+		return newDirOCIWriter(ref[len("oci:"):])
+	}
+	return newTarOCIWriter(ref)
 }
 
 func OpenBlobStore(ref string) (BlobStore, error) {
@@ -305,38 +410,8 @@ func writeTarFileFromReader(w *tar.Writer, name string, size int64, r io.Reader)
 	return err
 }
 
-func writeTarFileFromFile(w *tar.Writer, name string, filePath string) error {
-	f, err := os.Open(filePath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
 
-	info, err := f.Stat()
-	if err != nil {
-		return err
-	}
 
-	return writeTarFileFromReader(w, name, info.Size(), f)
-}
-
-func copyTarEntry(w *tar.Writer, header *tar.Header, r io.Reader) error {
-	if err := w.WriteHeader(header); err != nil {
-		return err
-	}
-	_, err := io.CopyN(w, r, header.Size)
-	return err
-}
-
-func writeBlobTarFile(w *tar.Writer, store BlobStore, d digest.Digest) error {
-	name := blobTarName(d)
-	r, size, err := store.ReadFile(name)
-	if err != nil {
-		return err
-	}
-	defer r.Close()
-	return writeTarFileFromReader(w, name, size, r)
-}
 
 func blobTarName(d digest.Digest) string {
 	return "blobs/sha256/" + d.Encoded()

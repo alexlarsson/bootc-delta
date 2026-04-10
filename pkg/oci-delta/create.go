@@ -1,7 +1,6 @@
 package ocidelta
 
 import (
-	"archive/tar"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -215,32 +214,23 @@ func CreateDelta(opts CreateOptions, log Logger) (*CreateStats, error) {
 		return nil, fmt.Errorf("failed to marshal index: %w", err)
 	}
 
-	// Write output archive.
-	outFile, err := os.Create(opts.OutputPath)
+	// Write output.
+	writer, err := OpenOCIWriter(opts.OutputPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create output file: %w", err)
+		return nil, fmt.Errorf("failed to create output: %w", err)
 	}
-	defer outFile.Close()
-
-	tarWriter := tar.NewWriter(outFile)
-	defer tarWriter.Close()
+	defer writer.Close()
 
 	log.Debug("\nWriting oci-layout")
-	if err := writeTarFile(tarWriter, "oci-layout", ociLayoutFileData); err != nil {
-		return nil, err
-	}
-	if err := writeTarDir(tarWriter, "blobs/"); err != nil {
-		return nil, err
-	}
-	if err := writeTarDir(tarWriter, "blobs/sha256/"); err != nil {
+	if err := writer.WriteFile("oci-layout", ociLayoutFileData); err != nil {
 		return nil, err
 	}
 
 	log.Debug("Writing image manifest and config blobs")
-	if err := writeTarFile(tarWriter, blobTarName(imageManifestDesc.Digest), imageManifestData); err != nil {
+	if err := writer.WriteFile(blobTarName(imageManifestDesc.Digest), imageManifestData); err != nil {
 		return nil, err
 	}
-	if err := writeTarFile(tarWriter, blobTarName(new.manifest.Config.Digest), imageConfigData); err != nil {
+	if err := writer.WriteFile(blobTarName(new.manifest.Config.Digest), imageConfigData); err != nil {
 		return nil, err
 	}
 
@@ -251,24 +241,24 @@ func CreateDelta(opts CreateOptions, log Logger) (*CreateStats, error) {
 		}
 		r := layerResultByDigest[l.Digest]
 		if r.diffPath != "" {
-			if err := writeTarFileFromFile(tarWriter, blobTarName(r.diffDigest), r.diffPath); err != nil {
+			if err := writeFileFromPath(writer, blobTarName(r.diffDigest), r.diffPath); err != nil {
 				return nil, err
 			}
 		} else {
-			if err := writeBlobTarFile(tarWriter, new.blobStore, r.digest); err != nil {
+			if err := writeBlob(writer, new.blobStore, r.digest); err != nil {
 				return nil, err
 			}
 		}
 	}
 
 	log.Debug("Writing delta manifest and index.json")
-	if err := writeTarFile(tarWriter, blobTarName(deltaConfigDigest), deltaConfigData); err != nil {
+	if err := writer.WriteFile(blobTarName(deltaConfigDigest), deltaConfigData); err != nil {
 		return nil, err
 	}
-	if err := writeTarFile(tarWriter, blobTarName(deltaManifestDigest), deltaManifestData); err != nil {
+	if err := writer.WriteFile(blobTarName(deltaManifestDigest), deltaManifestData); err != nil {
 		return nil, err
 	}
-	if err := writeTarFile(tarWriter, "index.json", indexData); err != nil {
+	if err := writer.WriteFile("index.json", indexData); err != nil {
 		return nil, err
 	}
 
