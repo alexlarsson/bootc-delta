@@ -37,14 +37,14 @@ func CreateDelta(opts CreateOptions, log Logger) (*CreateStats, error) {
 	stats := &CreateStats{}
 
 	log.Debug("Opening old image: %s", opts.OldImage)
-	oldReader, err := OpenOCIReader(opts.OldImage)
+	oldReader, err := OpenOCIReader(opts.OldImage, opts.TmpDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open old image: %w", err)
 	}
 	defer oldReader.Close()
 
 	log.Debug("Opening new image: %s", opts.NewImage)
-	newReader, err := OpenOCIReader(opts.NewImage)
+	newReader, err := OpenOCIReader(opts.NewImage, opts.TmpDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open new image: %w", err)
 	}
@@ -215,7 +215,7 @@ func CreateDelta(opts CreateOptions, log Logger) (*CreateStats, error) {
 	}
 
 	// Write output.
-	writer, err := OpenOCIWriter(opts.OutputPath)
+	writer, err := OpenOCIWriter(opts.OutputPath, opts.TmpDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create output: %w", err)
 	}

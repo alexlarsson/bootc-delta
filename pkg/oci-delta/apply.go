@@ -69,7 +69,7 @@ func ApplyDelta(opts ApplyOptions, log Logger) error {
 	// Reconstruct diff_id lookup from image config.
 	layerDiffIDs := delta.imageConfig.RootFS.DiffIDs
 
-	writer, err := OpenOCIWriter(opts.OutputPath)
+	writer, err := OpenOCIWriter(opts.OutputPath, opts.TmpDir)
 	if err != nil {
 		return fmt.Errorf("failed to create output: %w", err)
 	}
