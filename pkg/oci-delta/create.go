@@ -181,6 +181,11 @@ func CreateDelta(opts CreateOptions, log Logger) (*CreateStats, error) {
 	deltaManifest := v1.Manifest{
 		Versioned:    specs.Versioned{SchemaVersion: 2},
 		ArtifactType: mediaTypeDelta,
+		Subject: &v1.Descriptor{
+			MediaType: v1.MediaTypeImageManifest,
+			Digest:    imageManifestDesc.Digest,
+			Size:      int64(len(imageManifestData)),
+		},
 		Config: v1.Descriptor{
 			MediaType: v1.MediaTypeEmptyJSON,
 			Digest:    deltaConfigDigest,

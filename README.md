@@ -149,6 +149,9 @@ blobs/sha256/<layer-data-hash>      - one blob per changed layer (tar-diff or or
 
 The delta manifest is a standard OCI image manifest with `artifactType` set to
 `application/vnd.redhat.oci-delta.v1` and an empty config (`application/vnd.oci.empty.v1+json`).
+The `subject` field references the target image manifest, enabling referrer discovery when the
+delta is stored in a registry.
+
 It has the following top-level annotations:
 
 | Annotation | Description |
