@@ -162,6 +162,52 @@ It has the following top-level annotations:
 | `io.github.containers.delta.reused` | JSON array of layer digests that are expected to already be present on the target system |
 | `io.github.containers.delta.reused-diff-id` | JSON array of diff_ids (uncompressed sha256) for the reused layers, parallel to `delta.reused` |
 
+Example delta manifest:
+
+```json
+{
+  "schemaVersion": 2,
+  "artifactType": "application/vnd.redhat.oci-delta.v1",
+  "config": {
+    "mediaType": "application/vnd.oci.empty.v1+json",
+    "digest": "sha256:44136fa355b367...",
+    "size": 2
+  },
+  "layers": [
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "digest": "sha256:867b4193920b8192...",
+      "size": 715
+    },
+    {
+      "mediaType": "application/vnd.oci.image.config.v1+json",
+      "digest": "sha256:49dc3229d8ed7b49...",
+      "size": 299
+    },
+    {
+      "mediaType": "application/vnd.tar-diff",
+      "digest": "sha256:453b6a6f17f0ab18...",
+      "size": 674,
+      "annotations": {
+        "io.github.containers.delta.to": "sha256:dc2c7d87dce684ab..."
+      }
+    }
+  ],
+  "subject": {
+    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+    "digest": "sha256:867b4193920b8192...",
+    "size": 715
+  },
+  "annotations": {
+    "io.github.containers.delta.reused": "[\"sha256:ba4dfb86...\",\"sha256:cfa55bab...\"]",
+    "io.github.containers.delta.reused-diff-id": "[\"sha256:a8321da4...\",\"sha256:4f6932a5...\"]",
+    "io.github.containers.delta.source": "sha256:cf1de3f5d45cff6b...",
+    "io.github.containers.delta.source-config": "sha256:88e577dc6d4ab25c...",
+    "io.github.containers.delta.target": "sha256:867b4193920b8192..."
+  }
+}
+```
+
 ### Delta manifest layers
 
 The manifest layers contain the embedded image metadata followed by one entry per changed layer. Layers are identified
