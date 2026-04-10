@@ -89,13 +89,21 @@ cleanup() {
 trap cleanup EXIT
 echo "  Test directory: $TEST_DIR"
 
+STORAGE_ROOT="$TEST_DIR/storage"
+STORAGE_RUN="$TEST_DIR/run"
+STORAGE_DRIVER="overlay"
+
 export CONTAINERS_STORAGE_CONF="$TEST_DIR/storage.conf"
 cat > "$CONTAINERS_STORAGE_CONF" <<EOF
 [storage]
-driver = "overlay"
-graphroot = "$TEST_DIR/storage"
-runroot = "$TEST_DIR/run"
+driver = "$STORAGE_DRIVER"
+graphroot = "$STORAGE_ROOT"
+runroot = "$STORAGE_RUN"
 EOF
+
+podman() {
+    command podman --root "$STORAGE_ROOT" --runroot "$STORAGE_RUN" --storage-driver "$STORAGE_DRIVER" "$@"
+}
 
 echo "  Building oci-delta..."
 make -C "$PROJECT_DIR" build -s
