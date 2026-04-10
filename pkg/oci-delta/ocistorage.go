@@ -288,7 +288,6 @@ func (r *csOCIReader) Close() error {
 	return os.RemoveAll(r.tmpDir)
 }
 
-
 func copyImage(ctx context.Context, srcName, destName string) error {
 	srcRef, err := alltransports.ParseImageName(srcName)
 	if err != nil {

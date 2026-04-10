@@ -155,7 +155,7 @@ func TestParseOCIImage(t *testing.T) {
 	}`)
 
 	reader := newMemoryReader(map[string][]byte{
-		"index.json":              indexData,
+		"index.json":                indexData,
 		blobTarName(manifestDigest): manifestData,
 		blobTarName(configDigest):   configData,
 	})

@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 	"unsafe"
-
 )
 
 type OstreeRepoDataSource struct {
@@ -329,4 +328,3 @@ func ResolveOstreeDataSource(repoPath string, sourceConfigDigest string, log Log
 
 	return NewOstreeRepoDataSource(repoPath, ref, log)
 }
-

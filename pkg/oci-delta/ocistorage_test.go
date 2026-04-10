@@ -34,7 +34,7 @@ func createTestTar(t *testing.T, files map[string][]byte) string {
 
 func TestTarIndexReadFile(t *testing.T) {
 	files := map[string][]byte{
-		"index.json":         []byte(`{"schemaVersion":2}`),
+		"index.json":          []byte(`{"schemaVersion":2}`),
 		"blobs/sha256/abc123": []byte("blob content here"),
 	}
 	path := createTestTar(t, files)
@@ -183,9 +183,9 @@ func TestTarOCIWriterRoundTrip(t *testing.T) {
 	tarPath := filepath.Join(dir, "test.tar")
 
 	files := map[string][]byte{
-		"index.json":              []byte(`{"schemaVersion":2}`),
-		"blobs/sha256/deadbeef":   []byte("layer data"),
-		"blobs/sha256/cafebabe":   []byte("another blob"),
+		"index.json":            []byte(`{"schemaVersion":2}`),
+		"blobs/sha256/deadbeef": []byte("layer data"),
+		"blobs/sha256/cafebabe": []byte("another blob"),
 	}
 
 	w, err := newTarOCIWriter(tarPath)
